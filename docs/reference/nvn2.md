@@ -8,7 +8,7 @@ Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk
 
 ### How MKW fetches NVN2 functions
 
-- main imports two sdk symbols: the function `nvnBootstrapLoader` (sdk+0x6129c0) and the data word `nvnPrivate0` (4 bytes, sdk+0xedb150; the driver writes it from `nvnDeviceGetProcAddress`: 1 while the default dispatch table is active for a device lookup).
+- main imports two sdk symbols: the function `nvnBootstrapLoader` (sdk+0x6129c0) and the data word `nvnPrivate0` (u32, sdk+0xedb150; main reaches it through its GOT at main+0x32f40e8). The real `nvnDeviceGetProcAddress` sets it to 1 when it answers a device lookup from the driver's own dispatch table (sdk+0x5b6704); `nvnDeviceFinalize` clears it (sdk+0x5b0c7c). `nvnInstallGlobalDebugCallback` (sdk+0x5b0af0) is an empty function in this driver. main tests it at 797 places before its inlined header fast paths, which write `NVNcommandBuffer` internals (command and control pointers, command-handle words) directly; with 0 every such site calls the fetched function instead. **A host implementation must leave `nvnPrivate0` at 0** (it is sdk bss, zero at load, and only the sdk's own lookup writes it), so all NVN2 calls reach the host's functions.
 - At start-up (main+0xcf3a3c..0xcf3a84) main calls `nvnBootstrapLoader("nvnDeviceInitialize")` and `nvnBootstrapLoader("nvnDeviceGetProcAddress")`, then its C proc loader main+0xcf5560 `(NULL, getProcAddress)`, which calls `getProcAddress(device, name)` for **698 names** and stores each result in a function-pointer slot reached through the GOT (the pattern `dm/tools/nvn_slots_got.py` reads). After `nvnDeviceInitialize` it runs the loader again with the device (main+0xcf3ae8).
 - Static use sites: 260 of the 698 slots are loaded somewhere outside the loader (3,651 sites). The other 438 are fetched and never referenced by code that `nvn_slots_got.py` can follow; treat them as callable anyway.
 - 169 of the 698 names are new compared with the host's NVN1 table (`dm/gfx/nvn/names.txt` before Switch 2); 529 existed. The driver also answers 29 extra names outside the sorted table (below). All of them are in `names.txt`, so `nvnBootstrapLoader` / `nvnDeviceGetProcAddress` return a counting thunk for each (unimplemented ones log `[RED] NVN unimplemented function called` once).
@@ -256,9 +256,9 @@ Every item not computed from the device comes from a static table (sdk+0x59bf50)
 | `nvnDeviceGetSeparateSamplerHandle` | 0x5b0fe0 | 0 | same | returns samplerID << 20 (sign-extended from bit 31) |
 | `nvnDeviceGetSeparateTextureHandle` | 0x5b0ff0 | 0 | same | returns the texture ID unchanged |
 | `nvnDeviceGetTexelFetchHandle` | 0x5b1000 | 0 | same | returns the texture ID unchanged |
-| `nvnDeviceGetTextureHandle` | 0x5b1010 | 32 | same | returns textureID | samplerID << 20 (same encoding as NVN1) |
+| `nvnDeviceGetTextureHandle` | 0x5b1010 | 32 | same | returns textureID OR (samplerID << 20) (same encoding as NVN1) |
 | `nvnDeviceGetTimestampInNanoseconds` | 0x5b1020 | 2 | same | (device, const NVNcounterData *): counter+8 ticks × device+0x80 / device+0x84 (a rational tick→ns factor from NvRm GPU info +0x2e8/+0x2ec; NVN1 hard-coded 19.2 MHz) |
-| `nvnDeviceGetUniformBufferHandle` | 0x5d3490 | 0 | new | NEW (device, u64 gpuAddress, u64 size) → u64: gpuAddress >> 4 | ceil(size / 16) << 45 (a bindless uniform-buffer handle) |
+| `nvnDeviceGetUniformBufferHandle` | 0x5d3490 | 0 | new | NEW (device, u64 gpuAddress, u64 size) → u64: (gpuAddress >> 4) OR (ceil(size / 16) << 45) (a bindless uniform-buffer handle) |
 | `nvnDeviceGetWindowOriginMode` | 0x5b1040 | 0 | same | device+0 |
 | `nvnDeviceInitialize` | 0x5b5750 | 0 | same | through the patchable slot sdk+0xd96738 (interception) to sdk+0x5b5750: zeroes 0x22c8 bytes of the device, opens NvRm GPU (sdk+0x5be8a8), copies GPU info to device+0x10, creates internal pools, applies the builder's reserved address ranges |
 | `nvnDeviceInstallDebugCallback` | 0x5b0ae0 | 1 | same | no-op in this (release) driver; MKW calls it only with its debug option (main+0xcf3ddc) |
