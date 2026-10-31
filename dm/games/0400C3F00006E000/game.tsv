@@ -33,3 +33,8 @@ mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0x265100000
 sys_resource	0x4000000
+
+# ---- Shaders ----
+# where MKW's NVN2 shaders live (shader_split.py): Shader/*.bfsha and the Drive sarc's BAHS, Layout/*.blarc BNSH, Effect esetb BNSH, Lib/ (agl, gsys, sead, Terrain, Visualizer); main's own BNSH go to 'main'
+shader_groups	/Shader/=shader /Layout/=layout /Effect/=effect /Lib/=lib
+shader_note	Mario Kart World shaders
