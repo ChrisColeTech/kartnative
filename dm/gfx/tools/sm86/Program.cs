@@ -1,13 +1,16 @@
 // SM86 frontend harness (docs/reference/shaders-sm86.md). Commands:
-//   translate <out dir> [--isa sm86|maxwell] [--msl] [--metal] <program.bin>...
+//   translate <out dir> [--isa sm86|maxwell] [--msl] [--metal] [--jobs N] [--complete <list.txt>] <program.bin>...
 //       Translates each program to <out>/<key>.spv (and with --msl <key>.metal through spirv-cross, with --metal compiles it with xcrun metal).
 //       SM86 graphics programs are the 128-byte NVN2 header + 16-byte instructions, compute programs the instructions only; the stage comes from
 //       <key>.meta.json beside the file (ShaderExtract's dump, $W/shader/sm86) or --stage vs|ps|cs. Maxwell programs are the dmsh_xlate layout (0x50-byte SPH + code).
+//       Task and mesh programs are skipped (the translator has no such stages). A program is complete when the translator met no unsupported
+//       instruction; the summary counts complete programs per stage (and those whose MSL compiled), lists the opcodes that keep the others out
+//       (programs per opcode), and --complete writes the complete programs' paths.
 //   fuzz-maxwell <InstTable.cs> <count> <seed> <out.txt>
 //       Generates random Maxwell programs from the instruction table's encodings and writes one digest line per program and target (SPIR-V and GLSL, or the
 //       exception). Run with two translator builds (one with -p:Baseline=true -p:RyuSrc=<old copy>) and compare the files: the Maxwell path must not change.
 //   hand <out dir>
-//       Writes the hand-encoded SM86 test programs (Sm86Asm.cs) with their meta files, for the translate command.
+//       Writes the hand-encoded SM86 test programs (Sm86Programs.cs) with their meta files, for the translate command.
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
 using System;
@@ -90,8 +93,9 @@ static class Harness
     {
         string outDir = args[0];
         Directory.CreateDirectory(outDir);
-        string isa = "sm86", stageArg = null;
+        string isa = "sm86", stageArg = null, completeList = null;
         bool msl = false, metal = false;
+        int jobs = 1;
         var files = new List<string>();
 
         for (int i = 1; i < args.Length; i++)
@@ -102,11 +106,17 @@ static class Harness
                 case "--stage": stageArg = args[++i]; break;
                 case "--msl": msl = true; break;
                 case "--metal": msl = metal = true; break;
+                case "--jobs": jobs = int.Parse(args[++i]); break;
+                case "--complete": completeList = args[++i]; break;
                 default:
                     // Programs are <key>.bin; <key>.c<bank>.bin beside one is its constant segment (a glob over the dump picks those and the meta files up).
-                    if (args[i].EndsWith(".bin") && !System.Text.RegularExpressions.Regex.IsMatch(args[i], @"\.c\d+\.bin$"))
+                    // A directory stands for every program in it.
+                    foreach (string path in Directory.Exists(args[i]) ? Directory.GetFiles(args[i], "*.bin").OrderBy(f => f, StringComparer.Ordinal).ToArray() : new[] { args[i] })
                     {
-                        files.Add(args[i]);
+                        if (path.EndsWith(".bin") && !System.Text.RegularExpressions.Regex.IsMatch(path, @"\.c\d+\.bin$"))
+                        {
+                            files.Add(path);
+                        }
                     }
 
                     break;
@@ -114,73 +124,195 @@ static class Harness
         }
 
         string spirvCross = Environment.GetEnvironmentVariable("SPIRV_CROSS") ?? FindSpirvCross();
-        int ok = 0, bad = 0;
+        var results = new Result[files.Count];
 
-        foreach (string file in files)
+        System.Threading.Tasks.Parallel.For(0, files.Count, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = jobs }, index =>
         {
-            string key = Path.GetFileNameWithoutExtension(file);
-            string metaPath = Path.ChangeExtension(file, ".meta.json");
-            JsonObject meta = File.Exists(metaPath) ? JsonNode.Parse(File.ReadAllText(metaPath)).AsObject() : new JsonObject();
-            string stage = stageArg ?? (string)meta["stage"] ?? "vs";
-            byte[] c1Bytes = File.Exists(Path.ChangeExtension(file, ".c1.bin")) ? File.ReadAllBytes(Path.ChangeExtension(file, ".c1.bin")) : null;
-            int[] local = meta["local_size"] is JsonArray la ? la.Select(x => (int)x).ToArray() : null;
+            results[index] = TranslateOne(files[index], outDir, isa, stageArg, msl, metal, spirvCross);
+        });
 
-            try
+        int ok = 0, bad = 0, skipped = 0;
+        var complete = new SortedDictionary<string, (int Total, int Complete, int CompleteOk)>();
+        var missing = new Dictionary<string, int>();
+        var notes = new Dictionary<string, int>();
+        var completeFiles = new List<string>();
+
+        for (int index = 0; index < files.Count; index++)
+        {
+            Result r = results[index];
+            Console.WriteLine(r.Line);
+
+            if (r.Skipped)
             {
-                byte[] code = File.ReadAllBytes(file);
-                var acc = new Accessor(code, c1Bytes, local);
-                TranslationFlags flags = TranslationFlags.DebugMode;
+                skipped++;
+                continue;
+            }
 
-                if (stage is "cs" or "compute")
-                {
-                    flags |= TranslationFlags.Compute;
-                }
-
-                if (isa == "sm86")
-                {
-#if BASELINE
-                    throw new NotSupportedException("this build has no SM86 frontend");
-#else
-                    flags |= TranslationFlags.Sm86;
-#endif
-                }
-
-                ShaderProgram p = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags)).Translate();
-                string spv = Path.Combine(outDir, key + ".spv");
-                File.WriteAllBytes(spv, p.BinaryCode);
-                File.WriteAllLines(Path.Combine(outDir, key + ".notes.txt"), acc.Notes);
-                string result = $"spv {p.BinaryCode.Length} bytes, {acc.Notes.Count} notes";
-
-                if (msl)
-                {
-                    string mslPath = Path.Combine(outDir, key + ".metal");
-                    Run(spirvCross, new[] { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output", spv, "--output", mslPath });
-                    result += ", msl ok";
-
-                    if (metal)
-                    {
-                        Run("xcrun", new[] { "-sdk", "macosx", "metal", "-c", "-O1", mslPath, "-o", Path.Combine(outDir, key + ".air") });
-                        result += ", metal ok";
-                    }
-                }
-
-                Console.WriteLine($"{key} ({stage}): {result}");
+            if (r.Ok)
+            {
                 ok++;
             }
-            catch (Exception e)
+            else
             {
-                Console.WriteLine($"[RED] {key} ({stage}): {e.GetType().Name}: {e.Message.Split('\n')[0]}");
-                if (Environment.GetEnvironmentVariable("SM86_STACK") != null)
+                bad++;
+            }
+
+            complete.TryGetValue(r.Stage, out var c);
+            c.Total++;
+
+            if (r.Missing.Count == 0)
+            {
+                c.Complete++;
+                c.CompleteOk += r.Ok ? 1 : 0;
+
+                if (r.Ok)
                 {
-                    Console.WriteLine(e.StackTrace);
+                    completeFiles.Add(files[index]);
                 }
 
-                bad++;
+                foreach (string note in r.NoteKinds)
+                {
+                    notes[note] = notes.GetValueOrDefault(note) + 1;
+                }
+            }
+
+            foreach (string op in r.Missing)
+            {
+                missing[op] = missing.GetValueOrDefault(op) + 1;
+            }
+
+            complete[r.Stage] = c;
+        }
+
+        Console.WriteLine($"translated: {ok} ok, {bad} failed, {skipped} skipped (task / mesh)");
+
+        foreach (var (stage, c) in complete)
+        {
+            Console.WriteLine($"complete {stage}: {c.Complete} of {c.Total}, {c.CompleteOk} translated{(msl ? metal ? " and compiled" : " to MSL" : "")}");
+        }
+
+        Console.WriteLine($"complete: {complete.Values.Sum(c => c.Complete)} of {complete.Values.Sum(c => c.Total)}, {completeFiles.Count} translated{(msl ? metal ? " and compiled" : " to MSL" : "")}");
+        Console.WriteLine("unsupported opcodes (programs): " + string.Join(" ", missing.OrderByDescending(m => m.Value).Select(m => $"{m.Key}:{m.Value}")));
+
+        foreach (var (note, count) in notes.OrderByDescending(n => n.Value).Take(30))
+        {
+            Console.WriteLine($"note in complete programs ({count}): {note}");
+        }
+
+        if (completeList != null)
+        {
+            File.WriteAllLines(completeList, completeFiles.OrderBy(f => f, StringComparer.Ordinal));
+        }
+
+        return bad == 0 ? 0 : 1;
+    }
+
+    sealed class Result
+    {
+        public string Line;
+        public string Stage;
+        public bool Ok;
+        public bool Skipped;
+        public HashSet<string> Missing = new();
+        public HashSet<string> NoteKinds = new();
+    }
+
+    static readonly System.Text.RegularExpressions.Regex UnsupportedNote = new(@"^Unsupported SM86 instruction (0x[0-9a-f]+)");
+    static readonly System.Text.RegularExpressions.Regex HexNumber = new(@"0x[0-9A-Fa-f]+|\b[0-9a-f]{32}\b|\b\d+\b");
+
+    static Result TranslateOne(string file, string outDir, string isa, string stageArg, bool msl, bool metal, string spirvCross)
+    {
+        string key = Path.GetFileNameWithoutExtension(file);
+        string metaPath = Path.ChangeExtension(file, ".meta.json");
+        JsonObject meta = File.Exists(metaPath) ? JsonNode.Parse(File.ReadAllText(metaPath)).AsObject() : new JsonObject();
+        string stage = stageArg ?? (string)meta["stage"] ?? "vs";
+        var r = new Result { Stage = stage };
+
+        if (stage is "task" or "mesh")
+        {
+            r.Skipped = true;
+            r.Line = $"{key} ({stage}): skipped";
+            return r;
+        }
+
+        byte[] c1Bytes = File.Exists(Path.ChangeExtension(file, ".c1.bin")) ? File.ReadAllBytes(Path.ChangeExtension(file, ".c1.bin")) : null;
+        int[] local = meta["local_size"] is JsonArray la ? la.Select(x => (int)x).ToArray() : null;
+        var acc = new Accessor(File.ReadAllBytes(file), c1Bytes, local);
+
+        try
+        {
+            TranslationFlags flags = TranslationFlags.DebugMode;
+
+            if (stage is "cs" or "compute")
+            {
+                flags |= TranslationFlags.Compute;
+            }
+
+            if (isa == "sm86")
+            {
+#if BASELINE
+                throw new NotSupportedException("this build has no SM86 frontend");
+#else
+                flags |= TranslationFlags.Sm86;
+#endif
+            }
+
+            ShaderProgram p = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags)).Translate();
+            string spv = Path.Combine(outDir, key + ".spv");
+            File.WriteAllBytes(spv, p.BinaryCode);
+            File.WriteAllLines(Path.Combine(outDir, key + ".notes.txt"), acc.Notes);
+            string result = $"spv {p.BinaryCode.Length} bytes, {acc.Notes.Count} notes";
+            Classify(acc, r);
+
+            // Incomplete programs stop at SPIR-V: their MSL says nothing about the frontend.
+            if (msl && r.Missing.Count == 0)
+            {
+                string mslPath = Path.Combine(outDir, key + ".metal");
+                Run(spirvCross, new[] { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output", spv, "--output", mslPath });
+                result += ", msl ok";
+
+                if (metal)
+                {
+                    Run("xcrun", new[] { "-sdk", "macosx", "metal", "-c", "-O1", mslPath, "-o", Path.Combine(outDir, key + ".air") });
+                    result += ", metal ok";
+                }
+            }
+
+            r.Ok = true;
+            r.Line = $"{key} ({stage}): {result}{(r.Missing.Count != 0 ? ", incomplete: " + string.Join(" ", r.Missing) : "")}";
+        }
+        catch (Exception e)
+        {
+            Classify(acc, r);
+            r.Line = $"[RED] {key} ({stage}): {e.GetType().Name}: {e.Message.Split('\n')[0]}";
+
+            if (Environment.GetEnvironmentVariable("SM86_STACK") != null)
+            {
+                r.Line += "\n" + e.StackTrace;
             }
         }
 
-        Console.WriteLine($"translated: {ok} ok, {bad} failed");
-        return bad == 0 ? 0 : 1;
+        return r;
+    }
+
+    static void Classify(Accessor acc, Result r)
+    {
+        r.Missing.Clear();
+        r.NoteKinds.Clear();
+
+        foreach (string note in acc.Notes)
+        {
+            var m = UnsupportedNote.Match(note);
+
+            if (m.Success)
+            {
+                r.Missing.Add(m.Groups[1].Value);
+            }
+            else
+            {
+                r.NoteKinds.Add(HexNumber.Replace(note, "N"));
+            }
+        }
     }
 
     // The in-repo spirv-cross, found from this file's path at build time (the harness is built outside the repository).
