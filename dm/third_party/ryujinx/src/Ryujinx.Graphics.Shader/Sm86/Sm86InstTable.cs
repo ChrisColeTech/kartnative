@@ -91,6 +91,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
         static Sm86InstTable()
         {
+            AddAlu();
             AddFlow();
         }
 
