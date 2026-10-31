@@ -264,6 +264,50 @@ namespace Ryujinx.Graphics.Shader.Sm86
             SetPredDest(context, inst.Field(84, 3), GetPredLogicalOp(context, logicOp, context.BitwiseNot(res), accum), uniform);
         }
 
+        /// <summary>
+        /// FSET.BF d = 1.0 when the comparison (bits 76-79) of A and the second source, with their abs / neg modifiers, combined with the predicate in
+        /// bits 87-90 by bits 74-75 holds, else 0.0. These bits clear are FSET.BF (NAK's nvdisasm tests); FTZ (bit 80) is not modelled.
+        /// </summary>
+        public static void Fset(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+            bool uniform = IsUniform(inst);
+
+            CheckModifiers(context, inst, "FSET", ModMask(72, 73, 74, 75, 76, 77, 78, 79, 80, 87, 88, 89, 90));
+
+            Operand a = FpSrc(context, inst, Slot.A);
+            Operand b = FpSrc(context, inst, SecondSlot(inst));
+            Operand res = InstEmit.GetFPComparison(context, (FComp)inst.Field(76, 4), a, b);
+
+            res = GetPredLogicalOp(context, (BoolOp)inst.Field(74, 2), res, PredSrc(context, inst.Pred87, inst.Pred87Inv, uniform));
+
+            SetDest(context, inst, context.ConditionalSelect(res, ConstF(1), ConstF(0)));
+        }
+
+        /// <summary>
+        /// FSWZADD d = per quad lane l, an operation code from bits 32-39 (lane 0 in bits 38-39, lane 3 in 32-33): 0 A + B, 1 A - B, 2 B - A, 3 B, with
+        /// A in bits 24-31 and B the register in 64-71 (NAK OpFSwzAdd and its derivative lowering: lane 0 of ddx is A - B with A the neighbour).
+        /// Ryujinx's SwizzleAdd takes lane 0 in its low bits and codes 1 / 2 the other way round. Rounding (78-79) and FTZ (80) are not modelled.
+        /// </summary>
+        public static void Fswzadd(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "FSWZADD", ModMask(77, 78, 79, 80));
+
+            int ops = inst.Field(32, 8);
+            int mask = 0;
+
+            for (int lane = 0; lane < 4; lane++)
+            {
+                int code = (ops >> (6 - lane * 2)) & 3;
+
+                mask |= (code is 1 or 2 ? code ^ 3 : code) << (lane * 2);
+            }
+
+            SetDest(context, inst, context.FPSwizzleAdd(Gpr(inst.Ra), Gpr(inst.Rc), mask));
+        }
+
         /// <summary>FADD d = A + the second source; saturate bit 77 (rounding 78-79 and FTZ 80 are not modelled, as on Maxwell).</summary>
         public static void Fadd(EmitterContext context)
         {
@@ -310,19 +354,19 @@ namespace Ryujinx.Graphics.Shader.Sm86
         }
 
         /// <summary>
-        /// MUFU d = f(B), function in bits 74-79 (0 COS, 1 SIN, 2 EX2, 3 LG2, 4 RCP, 5 RSQ, 6 RCP64H, 7 RSQ64H, 8 SQRT). SM70+ SIN and COS take the
-        /// angle in turns (Maxwell's RRO did that division), so the argument is scaled by 2 pi.
+        /// MUFU d = f(B), function in bits 74-79 (0 COS, 1 SIN, 2 EX2, 3 LG2, 4 RCP, 5 RSQ, 6 RCP64H, 7 RSQ64H, 8 SQRT, 9 TANH). SM70+ SIN and COS take
+        /// the angle in turns (Maxwell's RRO did that division; the compiler emits FMUL.RZ by 1 / 2 pi before them), so the argument is scaled by 2 pi.
+        /// .F16 (bit 73): the source is the half that bits 60-61 select and the result an F16 in the low half (NAK OpMuFu). MKW uses functions 0-5 and
+        /// 8 on F32 only.
         /// </summary>
         public static void Mufu(EmitterContext context)
         {
             Sm86Inst inst = Inst(context);
+            bool f16 = inst.Bit(73);
 
-            if (inst.Bit(73))
-            {
-                context.TranslatorContext.GpuAccessor.Log($"SM86 MUFU.F16 at 0x{context.CurrOp.Address:X} is not implemented.");
-            }
+            CheckModifiers(context, inst, "MUFU", ModMask(73, 74, 75, 76, 77, 78, 79));
 
-            Operand src = FpSrc(context, inst, Slot.B);
+            Operand src = ConvFloatSrc(context, inst, f16 ? 1 : 2, out _);
             Operand res;
 
             switch (inst.Field(74, 6))
@@ -354,13 +398,18 @@ namespace Ryujinx.Graphics.Shader.Sm86
                 case 8:
                     res = context.FPSquareRoot(src);
                     break;
+                case 9:
+                    // tanh(x) = 1 - 2 / (e^2x + 1): exact at both infinities (e^2x overflowing to +inf gives 1, underflowing to 0 gives -1).
+                    Operand e2x = context.FPExponentB2(context.FPMultiply(src, ConstF(2 * 1.442695041f)));
+                    res = context.FPSubtract(ConstF(1), context.FPDivide(ConstF(2), context.FPAdd(e2x, ConstF(1))));
+                    break;
                 default:
                     context.TranslatorContext.GpuAccessor.Log($"SM86 MUFU function {inst.Field(74, 6)} at 0x{context.CurrOp.Address:X} is not implemented.");
                     res = src;
                     break;
             }
 
-            SetDest(context, inst, res);
+            SetDest(context, inst, f16 ? context.PackHalf2x16(res, ConstF(0)) : res);
         }
 
         /// <summary>
