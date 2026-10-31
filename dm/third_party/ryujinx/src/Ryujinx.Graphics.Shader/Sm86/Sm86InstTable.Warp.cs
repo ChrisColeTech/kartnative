@@ -30,6 +30,11 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("SHFL", 0xf89, Sm86Emit.Shfl, Rd, FeatureFlags.Shuffle);
             Add("MATCH", 0x3a1, Sm86Emit.Match, Rd);
             Add("REDUX", 0x3c4, Sm86Emit.Redux, Sm86InstProps.URd);
+
+            // Tensor-core operations, rebuilt from shuffles (Sm86Emit.Tensor.cs; Mesa NAK OpHmma, OpLdsm, OpMovm).
+            Add("HMMA", 0x23c, Sm86Emit.Hmma, Rd);
+            Add("MOVM", 0x23a, Sm86Emit.Movm, Rd);
+            Add("LDSM", 0x83b, Sm86Emit.Ldsm, Rd, FeatureFlags.SharedMemory);
         }
     }
 }
