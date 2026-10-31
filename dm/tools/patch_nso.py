@@ -202,6 +202,10 @@ def regset(ins):
     return {ins.reg_name(x) for x in r}, {ins.reg_name(x) for x in w}
 def num(name):
     m = re.fullmatch(r'[xw](\d+)', name or ''); return int(m.group(1)) if m else None
+def gpr_w(name):
+    """A general register's 32-bit name (x5 / w5 → w5), None for any other register: capstone names SIMD / FP registers s1, d1, q1, b1, h1 too, which must not read as w1.
+    Mario Kart World main+0xea494 loads ldr s1,[x18,#0xc] between its bounds check on w1 and the ldrsw x2,[x17,x1,lsl #2] of its jump table: read as a write to w1, the table was refused"""
+    n = num(name); return None if n is None else 'w%d' % n
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -851,7 +855,7 @@ def jump_adr_offsets(insl, j):
             if m and m.group(1) in idx: idx.add(m.group(2)); continue
             m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
             if m and m.group(1) in idx: cmp = p; break
-            if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+            if any(gpr_w(p.reg_name(r)) in idx for r in p.regs_access()[1]): return None   # the index changes after the check
         if cmp is None: return None
         n, at = int(cmp.op_str.split('#')[1], 0) + 1, wa.operands[1].imm
         def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
@@ -1003,7 +1007,7 @@ def half_count(insl, ld, base):
         if mm and mm.group(1) in idx: idx.add(mm.group(2)); continue
         mm = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
         if mm and mm.group(1) in idx: cmp = p; break
-        if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+        if any(gpr_w(p.reg_name(r)) in idx for r in p.regs_access()[1]): return None   # the index changes after the check
     kc = insl.index(cmp) if cmp is not None else -1
     if kc < 0 or insl[kc + 1].mnemonic not in ('b.hi', 'b.hs', 'b.cs'): return None   # only a compare that guards the dispatch bounds the index (b.hs: one entry more than needed)
     n = int(cmp.op_str.split('#')[1], 0) + 1
