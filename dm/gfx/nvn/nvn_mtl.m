@@ -19,6 +19,7 @@
 #endif
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
+#include "nvn2_cmd.h"   // NVN2 record payloads (OP_PUSH_CONST, OP_MESH)
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
@@ -1602,7 +1603,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[140];
+static int g_red_once[141];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4696,6 +4697,7 @@ static struct {
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
+    uint8_t push[DMSH_PUSH_SLOTS][PUSH_BLOCK];   // NVN2 graphics push-constant blocks (OP_PUSH_CONST), GPU state of the queue as Ampere's root tables are; bound as NVN_RB_PUSH (encode_args)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S;
 // The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
@@ -4869,7 +4871,7 @@ static int prog_swrites(NvProg *pr) {
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
     for (int st = 1; pr && st < 6 && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind;
-            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2) { g_pass_late_res = 1; break; } } }
+            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH) { g_pass_late_res = 1; break; } } }
 }
 // A draw that writes, after an ordering barrier in a pass whose earlier draws did not write (g_pass_order): when those draws read memory only in their vertex stage, or the barrier
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
@@ -7312,6 +7314,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 slots[aid] = g_cur_arena->gpu + doff;
                 USE(db, MTLResourceUsageRead);
             }
+        } else if (b->kind == NVN_RB_PUSH) {   // an NVN2 push-constant block: the bytes pushed last, copied per encode (the reuse check above keeps the copy while no push changed them)
+            id<MTLBuffer> db; size_t doff = arena_alloc(PUSH_BLOCK, &db); memcpy((uint8_t *)db.contents + doff, S.push[reg], PUSH_BLOCK);
+            slots[aid] = g_cur_arena->gpu + doff;
+            USE(db, MTLResourceUsageRead);
+            if (bl) { const float *f = (const float *)S.push[reg]; PD("B %llu st%d push%d f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, f[0], f[1], f[2], f[3]); }
         } else if (b->kind == NVN_RB_BORDER) continue;   // filled below, once every twin has been seen
         else RED_ONCE(46, "binding kind %d not implemented", b->kind);
     }
@@ -7609,6 +7616,16 @@ static int state_op(uint32_t op, const void *a) {
         case OP_TF_STATE: { const p_tf_state *b = a; S.tf_on = b->what == 0 || b->what == 3; break; }
         case OP_PRIM_RESTART: S.restart = *(const p_prim_restart *)a; break;
         case OP_RAST_DISCARD: S.rast_discard = ((const p_rast_discard *)a)->on; g_pso_dirty = 1; break;
+        // NVN2 push constants (nvn2_cmd.h): graphics block slot, which SM86 programs read as constant bank DMSH_PUSH_BANK0 + slot. Compute pushes land in the compute constant area
+        // (word slot * 64 + offset / 4 + 0x48, sdk+0x5d3a30) of a bank no SM86 compute program has been seen to read; Mario Kart World never pushes compute constants
+        case OP_PUSH_CONST: {
+            const p_push_const *pc = a;
+            if (pc->flags & PUSH_COMPUTE) { RED_ONCE(140, "compute push constants (PushComputeConstants): the constant bank SM86 compute programs read them from is not established; dropped"); break; }
+            const uint8_t *src = pc->data;
+            if (pc->flags & PUSH_DEFERRED) { uint64_t s; memcpy(&s, pc->data, 8); src = (const uint8_t *)(uintptr_t)s; if (!src) break; }   // read now, as the driver reads it at submit
+            uint32_t n = pc->offset < PUSH_BLOCK ? MIN(pc->size, PUSH_BLOCK - pc->offset) : 0; uint8_t *d = S.push[pc->slot % DMSH_PUSH_SLOTS] + pc->offset;
+            if (n && memcmp(d, src, n)) { memcpy(d, src, n); for (int st = 0; st < 5; st++) g_args_dirty[st] = 1; }
+            break; }
         default: return 0;
     }
     return 1;
@@ -7818,7 +7835,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
                 if (sl != cur) { n++; cur = sl; if (sl < *lo) *lo = sl; if (sl > *hi) *hi = sl; *mask |= 1ull << sl; } break; }
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) return n; break; }
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
-            case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
+            case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_PUSH_CONST:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
             case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
@@ -9371,7 +9388,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
         case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_COPY_STRIDE:
-        case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
+        case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND: case OP_PUSH_CONST: case OP_MESH:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
     }
@@ -10805,7 +10822,11 @@ void mtl_exec(const uint8_t *p) {
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (bits) { g_game_barrier = 1; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
-            case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
+            case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_PUSH_CONST: state_op(h.op, a); break;
+            case OP_MESH: { const p_mesh *m = a; static uint64_t n; n++;   // NVN2 mesh-shader draws: recorded (nvn2_cmd.c); there is no mesh path in the replay yet
+                PD("j %llu mesh draw skipped kind=%d %d %d %d ind=%#llx", g_stat_pass, m->kind, m->x, m->y, m->z, (unsigned long long)m->ind);
+                if (!(n & (n - 1))) MLOG("[RED] NVN2 mesh-shader draw (DrawMeshTasks family, kind %d) skipped: the replay has no mesh path yet (%llu skipped so far)", m->kind, (unsigned long long)n);
+                break; }
             default: break;
         }
         p += h.size;
