@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """NVN2 (Switch 2) shader binaries: the control section and code area of each stage, as Mario Kart World's containers hold them (docs/reference/shaders.md,
-"Switch 2 (NVN2) shader binaries"). shader_split.py keys and packages them like Switch 1 shaders.
+"Switch 2 (NVN2) shader binaries"). shader_split.py keys and packages them like Switch 1 shaders; nvn2_dump.py writes the SM86 programs and their census.
 
 Control section (0xd8 bytes; u32 unless noted; every field below was read on Mario Kart World 1.0.0's 11,567 distinct programs):
   +0x00 magic 0x98761234 (as on Switch 1)           +0x04 0xc9 (Switch 1: 1): what tells an NVN2 control from a Switch 1 one

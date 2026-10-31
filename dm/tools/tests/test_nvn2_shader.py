@@ -1,15 +1,20 @@
-"""NVN2 (Switch 2) shader binaries in shader_split.py (dm/gfx/tools/nvn2_shader.py): BNSH and BAHS holding NVN2 stages, agl's NDSR pack and sead's shader files are read
-and keyed by the fixed 0xd8 control bytes + the code area; Switch 1 control sections keep their keys. Synthetic bytes only, no game files."""
+"""NVN2 (Switch 2) shader binaries in shader_split.py (dm/gfx/tools/nvn2_shader.py): BNSH and BAHS holding NVN2 stages, agl's NDSR pack and sead's shader files are read,
+keyed by the fixed 0xd8 control bytes + the code area, and dumped by nvn2_dump.py; Switch 1 control sections keep their keys. Synthetic bytes only, no game files."""
 import hashlib
+import json
+import os
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools/fuzz'))
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import fuzz_shader_split as fz   # Switch 1 seeds (BNSH, BAHS) and shader_split with a profile
+import nvn2_dump
 import nvn2_shader as nvn2
 ss = fz.ss
 
@@ -140,6 +145,26 @@ class Containers(unittest.TestCase):
         ka, kb = ss.uniq_keys(a), ss.uniq_keys(b)
         self.assertEqual(set(ka), set(kb))
         self.assertTrue(all(ss.same_shader(ka[k][2:4], kb[k][2:4]) for k in ka))
+
+
+class Dump(unittest.TestCase):
+    def test_dump_and_census(self):
+        shaders = {'vs': stage('vs', c1=b'\3' * 0x10), 'cs': stage('cs', n=2)}
+        with tempfile.TemporaryDirectory() as t:
+            pkg = os.path.join(t, 'pkg'); os.makedirs(pkg); rows = []
+            for st, (ctl, code) in shaders.items():
+                rec = bytearray(b'BTCDBTCD' + bytes(0x30)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code))
+                open(os.path.join(pkg, f'{st}_x.bin'), 'wb').write(bytes(rec) + code + ctl); rows.append(f'{st}_x.bin\t0\t{st}\t{key(ctl, code)}\t/src')
+            open(os.path.join(t, 'map.tsv'), 'w').write('# x\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n' + '\n'.join(rows) + '\n')
+            with mock.patch.object(sys, 'argv', ['nvn2_dump.py', pkg, os.path.join(t, 'map.tsv'), os.path.join(t, 'out'), os.path.join(t, 'census.tsv')]): nvn2_dump.main()
+            vk, ck = key(*shaders['vs']), key(*shaders['cs'])
+            self.assertEqual(open(os.path.join(t, 'out', vk + '.bin'), 'rb').read(), shaders['vs'][1][:nvn2.HEADER_SIZE + 4 * 16])
+            self.assertEqual(open(os.path.join(t, 'out', vk + '.c1.bin'), 'rb').read(), b'\3' * 0x10)
+            m = json.load(open(os.path.join(t, 'out', ck + '.meta.json')))
+            self.assertEqual((m['stage'], m['code_size'], m['header_size'], m['local_size'], m['shared_size']), ('compute', 32, 0, [64, 1, 1], 0x900))
+            census = open(os.path.join(t, 'census.tsv')).read()
+            self.assertIn('918\t118\t4\t\t4\t2\t1\t0\t0\t0\t0\t1\t0\t0', census)   # NOP: 3 + 1 instructions in 2 programs
+            self.assertIn('#sph\tvertex\tSPH type 1 version 4 shader type vs\tconsistent\t1', census)
 
 
 if __name__ == '__main__':
