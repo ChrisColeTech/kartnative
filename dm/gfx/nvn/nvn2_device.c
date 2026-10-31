@@ -106,3 +106,17 @@ NVN2(nvnDeviceGenerateDebugDomainId, uint32_t, const NVNdevice *d, const char *n
 NVN2(nvnDeviceSetDebugLabel, void, NVNdevice *d, const char *l) { (void)d; (void)l; }
 NVN2(nvnDeviceWalkDebugDatabase, void, const NVNdevice *d, int type, void *cb, void *data) { (void)d; (void)type; (void)cb; (void)data; }
 NVN2(nvnInstallGlobalDebugCallback, void, void *cb, void *data) { (void)cb; (void)data; }   // an empty function in this driver (sdk+0x5b0af0)
+
+// NVX interop and tooling (docs/reference/nvn2.md#interception-interop-and-other-nvx-names; none has a use in MKW's main).
+// SetExternalDebuggerEnabledNVX jumps through a pointer whose default is `ret` (sdk+0x5b61b0): a no-op
+NVN2(nvnSetExternalDebuggerEnabledNVX, void, uint32_t on) { (void)on; }
+// SetGLInteropNVX (sdk+0x5b5f60) installs the GL interop interface the GL sync functions use; the host has no GL interop (they keep answering "no interop")
+NVN2(nvnSetGLInteropNVX, void, const void *iface) { if (iface) LOG("[RED] nvnSetGLInteropNVX: the host has no GL interop; GL syncs stay unsupported"); }
+// CUDAInteropFunction (sdk+0x5cc4f0): one entry point, argument {u16 version (1), u16, u32 result, u32 opcode, args*}; the driver writes {1, 1} into
+// the first two u16. The host has no CUDA: result 1 for another version, else 3 (unsupported), and 4 for an opcode above 9, as the driver answers those
+NVN2(nvnCUDAInteropFunction, void, void *a) {
+    uint16_t *v = (uint16_t *)a; uint32_t *res = (uint32_t *)((uint8_t *)a + 4), op = *(uint32_t *)((uint8_t *)a + 8);
+    uint16_t ver = v[0]; v[0] = v[1] = 1;
+    *res = ver != 1 ? 1 : op > 9 ? 4 : 3;
+    static int once; if (!once++) LOG("[RED] nvnCUDAInteropFunction opcode %u: the host has no CUDA interop (result %u)", op, *res);
+}
