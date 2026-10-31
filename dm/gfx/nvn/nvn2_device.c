@@ -2,6 +2,8 @@
 // (DM_GAME_SWITCH2) uses it. Facts: docs/reference/nvn2.md#device (sdk+0x... offsets of Mario Kart World 1.0.0's NVN2 driver).
 #include "../../host/hle.h"
 #include "nvn_impl.h"
+#include "nvn2_core.h"
+#include <stdatomic.h>
 
 // nvnDeviceGetInteger (sdk+0x5b57c0): the driver's static table (sdk+0x59bf50) for items 0x00-0xb0; items it does not list answer 0.
 // Items the driver computes from its NvRm GPU description (copied to device+0x10 by sdk+0x5bf090) take that copy's constants where the
@@ -56,3 +58,51 @@ NVN2(nvnDeviceGetInteger, void, const void *d, int what, int *out) {
         *out = api[w];
     }
 }
+
+// nvnPrivate0 (sdk bss, main reaches it through its GOT at main+0x32f40e8) gates main's inlined NVN header code, which writes the driver's own command
+// buffer fields and builds tagged command handles; at 0, every one of those 797 sites calls the fetched function. Only the real
+// nvnDeviceGetProcAddress sets it, and the host replaces that, so it must still read 0 here
+__attribute__((weak)) void *guest_sym(const char *name) { (void)name; return NULL; }   // loader.c; the graphics unit tests have no loader
+void nvn2_device_init(void) {
+    const volatile uint32_t *p = (const volatile uint32_t *)guest_sym("nvnPrivate0");
+    if (!p) LOG("[RED] NVN2: sdk symbol nvnPrivate0 not found; main's inlined NVN fast paths cannot be ruled out");
+    else if (*p) LOG("[RED] NVN2: nvnPrivate0 = %u: main would run its inlined NVN header code on the host's objects", *p);
+    else LOG("[nvn] NVN2: nvnPrivate0 is 0: main calls the fetched NVN functions (no inlined header code)");
+}
+
+// DeviceBuilder (0x18 bytes, sdk+0x5b0c30): the host's flags stay first (dev_builder_t, read by nvnDeviceInitialize); the NVX reserved address ranges after
+typedef struct { uint32_t flags, pad; int32_t nranges; const void *ranges; } d2b_t;
+_Static_assert(sizeof(d2b_t) <= 0x18 && offsetof(d2b_t, flags) == offsetof(dev_builder_t, flags), "the NVN2 device builder is 0x18 bytes");
+NVN2(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(d2b_t)); }
+NVN2(nvnDeviceBuilderGetFlags, int, const NVNdeviceBuilder *b) { return (int)((const d2b_t *)b)->flags; }
+// (builder, count, ranges of {u64, u64, u32}) (sdk+0x5b4230): fixed GPU address ranges the device reserves for pools placed with
+// nvnMemoryPoolBuilderSet{Generic,Special}AddressNVX. The host's GPU addresses are its CPU addresses: it reserves nothing (nvn2_pool_check reports such pools)
+NVN2(nvnDeviceBuilderSetReservedAddressRangesNVX, void, NVNdeviceBuilder *b, int n, const void *ranges) {
+    ((d2b_t *)b)->nranges = n; ((d2b_t *)b)->ranges = ranges;
+    if (n) LOG("[RED] nvnDeviceBuilderSetReservedAddressRangesNVX: %d fixed GPU address ranges are not reserved by the host", n);
+}
+NVN2(nvnDeviceBuilderGetReservedAddressRangesNVX, int, const NVNdeviceBuilder *b, const void **ranges) { *ranges = ((const d2b_t *)b)->ranges; return ((const d2b_t *)b)->nranges; }
+NVN2(nvnDeviceGetFlags, int, const NVNdevice *d) { return (int)((const dev_t_ *)d)->flags; }   // the builder's flags (sdk+0x5b0f70)
+// A bindless uniform-buffer handle (sdk+0x5d3490): (gpuAddress >> 4) | (ceil(size / 16) << 45)
+NVN2(nvnDeviceGetUniformBufferHandle, uint64_t, const NVNdevice *d, uint64_t addr, uint64_t size) { (void)d; return addr >> 4 | ((size + 15) >> 4) << 45; }
+// The command memory size a handle encodes (sdk+0x5b7340): only a tag-2 handle has one; the host's handles are tag 0 (nvn2_handles_ok)
+NVN2(nvnDeviceGetCommandHandleMemorySize, uint64_t, const NVNdevice *d, NVNcommandHandle h) { (void)d; return (h & 3) == 2 ? (h >> 38) & 0x3fffffc : 0; }
+// Fast-clear registrations (sdk+0x5b1070..0x5b10e0): the host has no compression, so there is no fast-clear table to fill; accepted
+NVN2(nvnDeviceRegisterFastClearColori, uint32_t, NVNdevice *d, const int *c, int f) { (void)d; (void)c; (void)f; return 1; }
+NVN2(nvnDeviceRegisterFastClearColorui, uint32_t, NVNdevice *d, const uint32_t *c, int f) { (void)d; (void)c; (void)f; return 1; }
+NVN2(nvnDeviceRegisterFastClearStencil, uint32_t, NVNdevice *d, int v) { (void)d; (void)v; return 1; }
+NVN2(nvnDeviceRegisterFastClearColorIndex, void, NVNdevice *d, const float *c, int f, int i) { (void)d; (void)c; (void)f; (void)i; }
+NVN2(nvnDeviceRegisterFastClearColoriIndex, void, NVNdevice *d, const int *c, int f, int i) { (void)d; (void)c; (void)f; (void)i; }
+NVN2(nvnDeviceRegisterFastClearColoruiIndex, void, NVNdevice *d, const uint32_t *c, int f, int i) { (void)d; (void)c; (void)f; (void)i; }
+// Debug and checkpoint functions of this release driver: no-ops returning 1 (sdk+0x59ee20..0x59ee70), no debugger (sdk+0x5b1060), a domain-ID counter (sdk+0x5b0ed0)
+NVN2(nvnDeviceSetAutomaticCheckpointsEnable, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceSetAutomaticCheckpointsMask, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceSetAutomaticCheckpointsSamplingInterval, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceSetAutomaticCheckpointsByDebugGroup, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceSetCheckpointCallStacksEnable, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceSetCheckpointMaxCallStacksDepth, uint32_t, NVNdevice *d, uint64_t a) { (void)d; (void)a; return 1; }
+NVN2(nvnDeviceIsExternalDebuggerAttached, uint32_t, const NVNdevice *d) { (void)d; return 0; }
+NVN2(nvnDeviceGenerateDebugDomainId, uint32_t, const NVNdevice *d, const char *name) { (void)d; (void)name; static _Atomic uint32_t id; return ++id; }
+NVN2(nvnDeviceSetDebugLabel, void, NVNdevice *d, const char *l) { (void)d; (void)l; }
+NVN2(nvnDeviceWalkDebugDatabase, void, const NVNdevice *d, int type, void *cb, void *data) { (void)d; (void)type; (void)cb; (void)data; }
+NVN2(nvnInstallGlobalDebugCallback, void, void *cb, void *data) { (void)cb; (void)data; }   // an empty function in this driver (sdk+0x5b0af0)

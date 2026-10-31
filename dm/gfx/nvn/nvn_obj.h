@@ -18,7 +18,8 @@ typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_s
 FITS(queue_builder_t, NVNqueueBuilder);
 typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; } queue_t;  FITS(queue_t, NVNqueue);
 
-typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
+// nvx_generic / nvx_special: NVN2 nvnMemoryPoolBuilderSet{Generic,Special}AddressNVX (fixed GPU addresses; nvn2_pool.c)
+typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; uint64_t nvx_generic, nvx_special; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
 typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; } pool_t;   FITS(pool_t, NVNmemoryPool);
 
@@ -57,7 +58,7 @@ typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; }
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t;   /* pool / off: NVN2 nvnEventGetMemoryPool / GetMemoryOffset */ FITS(ev_t, NVNevent);
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;   // nactive: SetNumActiveTextures (0 = all)
 FITS(win_builder_t, NVNwindowBuilder);
