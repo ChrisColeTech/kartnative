@@ -208,7 +208,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        private static Operand EmitAtomicOp(
+        // nxnative: internal, the SM86 ATOMS / ATOMG / RED emitters share it (Sm86/Sm86Emit.Mem.cs).
+        internal static Operand EmitAtomicOp(
             EmitterContext context,
             StorageKind storageKind,
             AtomOp op,
@@ -314,7 +315,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return res;
         }
 
-        private static void EmitLoad(
+        // nxnative: internal, the SM86 LDS / LDL emitters share it (Sm86/Sm86Emit.Mem.cs).
+        internal static void EmitLoad(
             EmitterContext context,
             StorageKind storageKind,
             LsSize2 size,
@@ -395,7 +397,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        private static void EmitStore(
+        // nxnative: internal, the SM86 STS / STL emitters share it (Sm86/Sm86Emit.Mem.cs).
+        internal static void EmitStore(
             EmitterContext context,
             StorageKind storageKind,
             LsSize2 size,
