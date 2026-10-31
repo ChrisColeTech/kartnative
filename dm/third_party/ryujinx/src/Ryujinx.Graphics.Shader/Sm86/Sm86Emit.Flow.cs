@@ -44,6 +44,25 @@ namespace Ryujinx.Graphics.Shader.Sm86
             EmitBranch(context, Sm86Decoder.BranchTarget(context.CurrOp));
         }
 
+        /// <summary>
+        /// BRA.U UPp: a branch on a uniform predicate (Mesa NAK OpBra, SM80+): UPp in bits 24-26, inverted by 27, with the guard; bits 87-89 are PT.
+        /// </summary>
+        public static void BraU(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+            ulong target = Sm86Decoder.BranchTarget(context.CurrOp);
+
+            if (target == context.CurrOp.Address + Sm86Decoder.InstSize)
+            {
+                return;
+            }
+
+            Operand cond = PredSrc(context, inst.Field(24, 3), inst.Bit(27), true);
+            Operand guard = FlowCondition(context, inst, withGuard: true);
+
+            context.BranchIfTrue(context.GetLabel(target), guard == null ? cond : context.BitwiseAnd(guard, cond));
+        }
+
         private static void EmitBranch(EmitterContext context, ulong target)
         {
             Sm86Inst inst = Inst(context);
@@ -111,20 +130,24 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
             if (!context.IsNonMain)
             {
-                context.TranslatorContext.GpuAccessor.Log($"SM86 RET at 0x{context.CurrOp.Address:X} in the main function.");
+                context.TranslatorContext.GpuAccessor.Log($"SM86 RET at 0x{context.CurrOp.Address:X} in the main function is not implemented.");
                 return;
             }
 
             EmitConditional(context, FlowCondition(context, inst, withGuard: false), () => context.Return());
         }
 
+        /// <summary>
+        /// EXIT. A Ryujinx function cannot end the invocation, so an EXIT inside a called function is not translated (no MKW program has one: every MKW
+        /// callee returns with RET); the note makes the chain drop the program rather than run it on.
+        /// </summary>
         public static void Exit(EmitterContext context)
         {
             Sm86Inst inst = Inst(context);
 
             if (context.IsNonMain)
             {
-                context.TranslatorContext.GpuAccessor.Log($"SM86 EXIT at 0x{context.CurrOp.Address:X} in a called function.");
+                context.TranslatorContext.GpuAccessor.Log($"SM86 EXIT at 0x{context.CurrOp.Address:X} in a called function is not implemented.");
                 return;
             }
 
@@ -144,7 +167,10 @@ namespace Ryujinx.Graphics.Shader.Sm86
             EmitConditional(context, FlowCondition(context, inst, withGuard: false), () => context.Discard());
         }
 
-        /// <summary>BRX Ra: branch to (next instruction + 4 * bits 34-81) + Ra, the targets found by Sm86Flow.FindBrxTargets.</summary>
+        /// <summary>
+        /// BRX Ra (BRXU URa, 0x958): branch to (next instruction + 4 * bits 34-81) + Ra, the targets found by Sm86Flow.FindBrxTargets. BRXU takes the
+        /// index from the uniform register in bits 24-29.
+        /// </summary>
         public static void Brx(EmitterContext context)
         {
             Sm86Inst inst = Inst(context);
@@ -156,7 +182,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
                 return;
             }
 
-            Operand address = context.IAdd(Gpr(inst.Ra), Const((int)Sm86Decoder.BranchTarget(context.CurrOp)));
+            Operand index = Sm86Flow.IsBrxu(inst) ? UGpr(inst.URa) : Gpr(inst.Ra);
+            Operand address = context.IAdd(index, Const((int)Sm86Decoder.BranchTarget(context.CurrOp)));
 
             Operand cond = FlowCondition(context, inst, withGuard: false);
             Operand lblSkip = null;

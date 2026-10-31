@@ -169,9 +169,14 @@ namespace Ryujinx.Graphics.Shader.Sm86
             return (ulong)((long)op.Address + InstSize + Inst(op).SignedBits(34, 48) * 4);
         }
 
-        /// <summary>True when the guard and the second condition (bits 87-90) are both PT.</summary>
+        /// <summary>True when the guard and the second condition (bits 87-90, or BRA.U's uniform predicate in bits 24-27) are all PT.</summary>
         public static bool IsUnconditional(Sm86Inst inst)
         {
+            if (inst.Opcode == Sm86Flow.OpBraU && (inst.Field(24, 3) != 7 || inst.Bit(27)))
+            {
+                return false;
+            }
+
             return inst.Pred == 7 && !inst.PredInv && inst.Pred87 == 7 && !inst.Pred87Inv;
         }
 

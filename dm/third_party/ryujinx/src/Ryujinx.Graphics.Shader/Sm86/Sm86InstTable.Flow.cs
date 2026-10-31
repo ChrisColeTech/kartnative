@@ -9,7 +9,9 @@ namespace Ryujinx.Graphics.Shader.Sm86
         private static void AddFlow()
         {
             Add("BRA", 0x947, Sm86Emit.Bra, Sm86InstProps.Branch | Sm86InstProps.NoPred);
+            Add("BRA.U", 0x547, Sm86Emit.BraU, Sm86InstProps.Branch | Sm86InstProps.NoPred);
             Add("BRX", 0x949, Sm86Emit.Brx, Sm86InstProps.Brx);
+            Add("BRXU", 0x958, Sm86Emit.Brx, Sm86InstProps.Brx);
             Add("CALL", 0x944, Sm86Emit.Call, Sm86InstProps.Call | Sm86InstProps.NoPred);
             Add("RET", 0x950, Sm86Emit.Ret, Sm86InstProps.Ret);
             Add("EXIT", 0x94d, Sm86Emit.Exit, Sm86InstProps.Exit);
