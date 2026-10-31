@@ -12,6 +12,12 @@
 //       exception). Run with two translator builds (one with -p:Baseline=true -p:RyuSrc=<old copy>) and compare the files: the Maxwell path must not change.
 //   hand <out dir>
 //       Writes the hand-encoded SM86 test programs (Sm86Programs.cs) with their meta files, for the translate command.
+//   warp <out dir> <alu_run>
+//       Runs the warp and tensor tests (WarpTests.cs) on the Mac GPU through alu_run (alu_run.swift): each hand-encoded fragment program renders 8x4
+//       pixels, one 32-wide SIMD group, and its R0-R3 are compared with a C# model of the warp. Each test runs with and without DebugMode.
+//   alu <out dir> <alu_run binary> [--math safe|relaxed|fast] [--filter <substring>] [--jobs N]
+//       Runs the hand-encoded ALU programs (AluTests.cs) on the GPU. Build the runner once with
+//       xcrun swiftc -O dm/gfx/tools/sm86/alu_run.swift -o $W/sm86/alu_run (outside the repository).
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
 using System;
@@ -32,6 +38,12 @@ sealed class Accessor : IGpuAccessor
     int _binding = 1;
     public readonly List<string> Notes = new();
 
+    /// <summary>The binding the translator got for each constant-buffer slot (GPU tests bind their data there).</summary>
+    public readonly Dictionary<int, int> ConstantBufferBindings = new();
+
+    /// <summary>Declares colour target 0 as unsigned integer (GPU tests read raw register bits back).</summary>
+    public bool UintColor0;
+
     public Accessor(byte[] code, byte[] c1 = null, int[] local = null)
     {
         _code = code;
@@ -41,9 +53,19 @@ sealed class Accessor : IGpuAccessor
 
     public uint ConstantBuffer1Read(int offset) => offset >= 0 && offset + 4 <= _c1.Length ? BitConverter.ToUInt32(_c1, offset) : 0;
     public void Log(string message) => Notes.Add(message);
-    public SetBindingPair CreateConstantBufferBinding(int index) => new(0, _binding++);
+    public SetBindingPair CreateConstantBufferBinding(int index) { ConstantBufferBindings[index] = _binding; return new(0, _binding++); }
     public SetBindingPair CreateImageBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
     public SetBindingPair CreateStorageBufferBinding(int index) => new(0, _binding++);
+#if !BASELINE
+    public GpuGraphicsState QueryGraphicsState()
+    {
+        var outputs = new Ryujinx.Common.Memory.Array8<AttributeType>();
+        outputs[0] = UintColor0 ? AttributeType.Uint : AttributeType.Float;
+
+        return new GpuGraphicsState(false, InputTopology.Points, false, TessPatchType.Triangles, TessSpacing.EqualSpacing, false, false, false, false, false, 1f,
+            AlphaTestOp.Always, 0f, default, true, outputs, false, false, false, false);
+    }
+#endif
     public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
     public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
     {
@@ -67,7 +89,7 @@ static class Harness
     {
         if (args.Length == 0)
         {
-            Console.Error.WriteLine("usage: sm86_harness translate|fuzz-maxwell|hand ...");
+            Console.Error.WriteLine("usage: sm86_harness translate|fuzz-maxwell|hand|warp ...");
             return 2;
         }
 
@@ -77,6 +99,8 @@ static class Harness
             "translate" => Translate(args.Skip(1).ToArray()),
 #if !BASELINE
             "hand" => Sm86Programs.Write(args[1]),
+            "warp" => WarpTests.Run(args[1], args[2]),
+            "alu" => AluTests.Run(args.Skip(1).ToArray()),
 #endif
             _ => Usage(args[0]),
         };
@@ -327,12 +351,12 @@ static class Harness
     }
 
     // The in-repo spirv-cross, found from this file's path at build time (the harness is built outside the repository).
-    static string FindSpirvCross([System.Runtime.CompilerServices.CallerFilePath] string sourcePath = "")
+    internal static string FindSpirvCross([System.Runtime.CompilerServices.CallerFilePath] string sourcePath = "")
     {
         return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourcePath), "../spirv_cross_bin/spirv-cross"));
     }
 
-    static void Run(string exe, string[] args)
+    internal static void Run(string exe, string[] args)
     {
         var psi = new ProcessStartInfo(exe) { RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (string a in args)
