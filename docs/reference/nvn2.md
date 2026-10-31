@@ -1,10 +1,28 @@
 # NVN2 (Switch 2 NVN)
 
-The NVN API of Switch 2 games (NVN2), as Mario Kart World 1.0.0 (`0400C3F00006E000`, SDK `NintendoSDK_NVN-19_3_3`) uses it: how the game reaches the driver, every function it fetches, object sizes and layouts, and the paths a Metal implementation has to replace (shader programs, memory pools, present, syncs, DLSS). It is the reference for reimplementing NVN2 on Metal; the host does not implement NVN2 yet (Switch 1 NVN: [nvn-objects.md](nvn-objects.md), [rendering.md](rendering.md)).
+The NVN API of Switch 2 games (NVN2), as Mario Kart World 1.0.0 (`0400C3F00006E000`, SDK `NintendoSDK_NVN-19_3_3`) uses it: how the game reaches the driver, every function it fetches, object sizes and layouts, and the paths a Metal implementation has to replace (shader programs, memory pools, present, syncs, DLSS). It is the reference for reimplementing NVN2 on Metal; what the host implements so far is in [Host implementation](#host-implementation) (Switch 1 NVN: [nvn-objects.md](nvn-objects.md), [rendering.md](rendering.md)).
 
 Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk module (build ID `90ebba182862b9ecdc21fcb87b999012`, which contains the NVN2 driver) and `main+0x…` in main (`9e244438c3d8ef1c703a6a85ef99c4f0`). Offsets are into the loaded image (`dm/tools/nso.py <module> <out.bin>`; Ghidra on `dm/tools/nso2elf.py` output adds 0x100000). "NVN1" means the NVN 55 interface in `dm/gfx/nvn/include/nvn.h` that the host implements; "same ABI" means the driver uses the arguments `nvn.h` declares, with the same types. Statements marked [INFERENCE] were not checked against code.
 
-Clean-room C declarations of these facts (object sizes, enums the binary shows, prototypes of every new function and of every function whose ABI changed) are in [`dm/gfx/nvn/include/nvn2.h`](../../dm/gfx/nvn/include/nvn2.h); nothing includes it yet.
+Clean-room C declarations of these facts (object sizes, enums the binary shows, prototypes of every new function and of every function whose ABI changed) are in [`dm/gfx/nvn/include/nvn2.h`](../../dm/gfx/nvn/include/nvn2.h).
+
+## Host implementation
+
+The host keeps one NVN layer for both consoles: the NVN1 implementations in `dm/gfx/nvn/hle_nvn.c` serve NVN2 wherever this page says "same ABI", and the differences live in `dm/gfx/nvn/nvn2_*.c`, registered with `NVN2(name, ret, args...)` ([`nvn_impl.h`](../../dm/gfx/nvn/nvn_impl.h)). Those entries go to their own section (`__DATA,swnvn2`), which `nvn_init_slots` applies over the NVN1 table only in a Switch 2 build (`DM_GAME_SWITCH2`, profile `switch2 on`); they also take precedence over hle_nvn.c's empty-implementation list. A Switch 1 build never applies them, and every NVN2-only branch inside hle_nvn.c tests `DM_GAME_SWITCH2`. Core behaviour (device, pools, queues, syncs, events, handles):
+
+| Area | Host behaviour | File |
+|---|---|---|
+| Version and device information | 231.16 and the driver's table for items 0x00–0xb0 ([Device information](#device-information)); 0x2e–0x31 = 201.0–201.11, without the NVN1 GLSLC override. Device-dependent items: texture limits from the driver's constants (32768 / 16384 3D / 2048 layers), the SM version 0x808 → item 0x7d = 8, and host choices where the driver asks NvRm (L2 1 MiB, scratch factors 12 / 384 / 384, item 0x62 = 0, item 0x9a = 0). `DM_NVN_API=major.minor` still overrides the version | `nvn2_device.c` |
+| `nvnPrivate0` | read at `nvnDeviceInitialize` through the sdk export; logged `[RED]` if non-zero or missing (MKW: 0) | `nvn2_device.c` |
+| Device builder and device | 0x18-byte builder; flags, NVX reserved address ranges stored (a non-empty list is `[RED]`: the host reserves no GPU ranges); `GetUniformBufferHandle`, `GetCommandHandleMemorySize`, fast-clear registrations (accepted, the host has no compression), checkpoint and debug functions as the release driver answers them | `nvn2_device.c` |
+| Memory pools | GPU address = storage address for every storage-backed pool (as the driver maps them, fixed inside its allocation over the application range); a virtual pool gets a host-reserved address range of its own, outside every storage, which MapVirtual aliases or tracks page by page (hle_nvn.c `vpool_reserve`). Flags are normalised as `nvnMemoryPoolInitialize` does and `GetFlags` hides bits 22–31; builder defaults 0x21; NVX: no NvRm handles (import is `[RED]`), generic address = storage, special address = storage for COMPRESSIBLE pools, fixed addresses other than the storage are `[RED]` | `nvn2_pool.c`, `hle_nvn.c` |
+| Buffers, events | NVN1 implementations; builder device, debug ID 0, event storage getters | `nvn2_pool.c` |
+| Queue builder and queues | NVN2 builder layout (32-bit sizes and their "set" flags, primary queue, ray-tracing size, priority 100); queue memory = control + command size; every queue kind (flags 0x4 / 0x8 / 0x10) replays on the host's one Metal queue in submission order, so primary/subcontext queues need nothing more; usage counters 0; NVX timeout / timeslice accepted | `nvn2_sync.c` |
+| Syncs | Metal fence serials as for NVN1; a sync never fenced waits as FAILED and `QueueWaitSync` returns 0 for it (sdk+0x5c8310, sdk+0x5c8850); GL interop answers "no interop" (4); the NVX syncpoint functions are `[RED]` and false (the host has no NvRm syncpoints) | `nvn2_sync.c`, `hle_nvn.c` |
+| Command handles | the host's handles are 8-byte-aligned pointers to its first record, which is NVN2's tag 0; SubmitCommands / CallCommands / CopyCommands drop a handle with tag 1–3 with one `[RED]` (only main's `nvnPrivate0`-gated code could build one) | `nvn2_sync.c` |
+| Windows | `SetNumActiveTextures` is honoured: acquire cycles through the first n textures (MKW: 3 built, 2 or 3 active) | `hle_nvn.c` |
+
+Verified on MKW (headless Mac, `$W/run/lockrun.sh`): `[nvn] NVN2: 121 Switch 2 implementations`, `nvnPrivate0 is 0`, `device API 231.16 (NVN2)`; main then creates its device, five queues (one with flags 9, its secondary queues with `SetPrimaryQueue`), its window (2560×1440, 3 textures), 3,165 memory pools in 40 s (26 GB of pool address space, 21.9 GB of it in 42 virtual pools with flags 0x2a1), records and submits command buffers and presents about 200 frames, with no `[RED]` from the core functions. The pools themselves wrap about 4.1 GB of storage and 1–2.6 GB of mapped virtual runs in Metal buffers. What stops the run is outside the core: Metal reports "Insufficient Memory" on upload command buffers around frame 150–200, because textures in the sparse 0x2a1 pools are uploaded whole (single MTLTextures of 389 MB, 1,451 MB and 5,803 MB, each with a staging buffer and a CPU gather copy of the same size; open, textures).
 
 ## Entry points
 
@@ -1536,17 +1554,18 @@ Not in the 698-name table any more (it was in NVN1's names.txt); implemented at 
 
 ### Notes for the host (nxnative)
 
-- Keep `nvnPrivate0` at 0 (never let the real GetProcAddress set it); then MKW only uses the proc pointers and never touches command/control memory internals itself. Only the byte at +0x10 is written regardless.
-- `cmd_t` still fits; the handle format is the host's own as long as `nvnPrivate0 == 0` (main only decodes handles in gated code, e.g. main+0x2b720).
-- Fix the NVN1 prototypes for `PopDebugGroup` and `InsertDebugMarker` if they are ever implemented beyond no-ops (currently no-ops in hle_nvn.c, so safe).
+- Keep `nvnPrivate0` at 0 (never let the real GetProcAddress set it); then MKW only uses the proc pointers and never touches command/control memory internals itself. Only the byte at +0x10 is written regardless. The host checks it at device creation (`nvn2_device.c`).
+- `cmd_t` still fits; the handle format is the host's own as long as `nvnPrivate0 == 0` (main only decodes handles in gated code, e.g. main+0x2b720). The host's handles are tag 0 ([Host implementation](#host-implementation)).
+- `PopDebugGroup` and `InsertDebugMarker` are no-ops in hle_nvn.c, so their changed ABI is safe; an NVN2 implementation of either would replace the no-op (`NVN2()`).
 - Deferred binds/pushes must read their array **at submit time**, not at record time.
-- `SetCommandMemoryCallbackEnabled(false)` (MKW does this) means: when command memory runs out, the driver neither calls back nor aborts.
+- `SetCommandMemoryCallbackEnabled(false)` (MKW does this) means: when command memory runs out, the driver neither calls back nor aborts. The host continues such a recording in a host-lent segment (`cmd_t.cb_off`).
+- `PushGraphicsConstants(cmd, slot, offset, size, data)` writes Ampere methods 0x504 / 0x508 (SET_ROOT_TABLE_SELECTOR / LOAD_ROOT_TABLE, header 0xA0010141); SM86 graphics programs read slot k as constant bank 24 + k. MKW's one call (main+0x16d72e8) pushes {1/W, 1/H, W, H} into slot 0, offset 0, 16 bytes, and the five MKW programs that read bank 24 read exactly bytes 0..0xC ([rendering.md](rendering.md)).
+- `SetGeometryProcessingMode` brackets mesh draws: 1 or 2 before `DrawMeshTasks`, 0 after (main+0x5d6308..0x5d647c, main+0x403d0c..0x403db0). `ShadingRateImagePalette(cmd, viewport, count, rates)`: main+0x403480..0x4034f0 sets viewports 0–4 with 16 entries in NV_shading_rate_image order (5 = 1×1); at run time MKW binds a non-NULL shading-rate image and uses rate 8 (2×2).
 
 ### Open questions
 
-- Meaning of geometry processing modes 1 vs 2, conservative raster mode values, shading-rate palette mode, `ShadingRateImagePalette` first argument (viewport index?), compute overlap mode values.
+- Meaning of geometry processing modes 1 vs 2, conservative raster mode values, shading-rate palette mode, compute overlap mode values.
 - Whether NVNshaderStage 6/7 are task/mesh in that order; meaning of stage 8 (ray tracing assumed).
-- `PushGraphicsConstants` second argument: stage or block index.
 - RT argument roles (raygen/miss/hit/callable naming, Region field order, copy/compact destination order, BuildInfo field names).
 - `ComputeDirtyTileMap` roles of its three address/int arguments; `BindDeviceMessageBuffer` third argument (index vs size).
 - Who allocates +0x98 (freed by Finalize); fields +0x88 / +0xA0.
@@ -2047,7 +2066,7 @@ MKW (main+0x8f7044..0x8f70a4): EventBuilderSetDefaults → SetStorage(pool, offs
 ## Open questions: queues, windows, syncs and events
 
 - Official names of queue flags 0x4 / 0x8 / 0x10. The behavior is established; the names are guesses. Is 0x10 the copy-engine queue? Device info +0x27c is presumably that engine's class.
-- MKW's queue loop (main+0x8f70c4) passes flags 1 to slot 0, while slots 1–2 use flag 4 with SetPrimaryQueue(obj+8). The init requires the primary to have flag 0x8. Is obj+8 the flags-9 queue made at main+0xcf4034, or are slots 1–2 never enabled? (Each slot is gated by a bit at slot+0x50.)
+- MKW's queue loop (main+0x8f70c4) passes flags 1 to slot 0, while slots 1–2 use flag 4 with SetPrimaryQueue(obj+8). The init requires the primary to have flag 0x8. At run time main calls `SetPrimaryQueue` and creates five queues in all, so subcontext queues are in use; which queue obj+8 is (the flags-9 queue of main+0xcf4034?) was not traced.
 - The units of the timeslice values (0x80 / 0x400 / 0x3fc00) and of the nvnQueueSetTimesliceNVX argument before scaling by device-info +0x2ec/+0x2e8.
 - Whether the NVN2 header's reserved sizes are exactly MKW's allocation sizes (queue 0x3000, window 0x280, window builder 0x80, sync 0x40, event 0x40). Queue builder reserve is 0x48..0x50; event builder reserve was not established.
 - Window builder +0x24 (color space) is stored but not read by nvnWindowInitialize. The wsi color space follows the texture format instead. Is it read elsewhere?
