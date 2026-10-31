@@ -262,8 +262,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
             }
             else if (props.HasFlag(Sm86InstProps.Ipa))
             {
-                // IPA: attribute word address in bits 64-71.
-                Decoder.SetUserAttributeUses(definitions, context, inst.Field(64, 8) * 4, 1, false, false, false);
+                // IPA: attribute word address in bits 64-71; bit 91 adds the uniform register in bits 24-29 (an indexed access, opcode 0x526).
+                Decoder.SetUserAttributeUses(definitions, context, inst.Field(64, 8) * 4, 1, false, inst.Bit(91), false);
             }
         }
     }
