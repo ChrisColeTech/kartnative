@@ -109,8 +109,9 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
             if (!HAS(0)) return 0; uint32_t n; memcpy(&n, payload + 4, 4);
             return !(payload[0] & PUSH_DEFERRED) || (HAS(offsetof(p_push_const, data)) && ops->addr(ctx, F(offsetof(p_push_const, data)), n, 0));
         }
-        case OP_MESH: {   // the indirect records (drawCount or maxDrawCount of them, stride apart) and the draw count the GPU reads
-            if (!HAS(32)) return 0; const p_mesh *m = (const p_mesh *)payload; int three = m->kind & 1;
+        case OP_MESH: {   // a direct draw's record stops before ind (no address); else the indirect records (drawCount or maxDrawCount of them, stride apart) and the draw count the GPU reads
+            if (!HAS(8)) return 0; if (!HAS(16)) return 1; if (!HAS(32)) return 0;
+            const p_mesh *m = (const p_mesh *)payload; int three = m->kind & 1;
             uint64_t rec = three ? 12 : 8, stride = m->stride > 0 ? (uint64_t)m->stride : rec, n = m->kind >= MESH_MULTI_INDIRECT && m->n > 0 ? (uint64_t)m->n : 1;
             if (m->ind) ok &= ops->addr(ctx, F(offsetof(p_mesh, ind)), stride * (n - 1) + rec, 0);
             if (m->cnt) ok &= ops->addr(ctx, F(offsetof(p_mesh, cnt)), 4, 0);

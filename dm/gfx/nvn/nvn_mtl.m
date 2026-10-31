@@ -10823,7 +10823,7 @@ void mtl_exec(const uint8_t *p) {
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (bits) { g_game_barrier = 1; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_PUSH_CONST: state_op(h.op, a); break;
-            case OP_MESH: { const p_mesh *m = a; static uint64_t n; n++;   // NVN2 mesh-shader draws: recorded (nvn2_cmd.c); there is no mesh path in the replay yet
+            case OP_MESH: { p_mesh t; const p_mesh *m = mesh_rec(a, h.size, &t); static uint64_t n; n++;   // NVN2 mesh-shader draws: recorded (nvn2_cmd.c); there is no mesh path in the replay yet
                 PD("j %llu mesh draw skipped kind=%d %d %d %d ind=%#llx", g_stat_pass, m->kind, m->x, m->y, m->z, (unsigned long long)m->ind);
                 if (!(n & (n - 1))) MLOG("[RED] NVN2 mesh-shader draw (DrawMeshTasks family, kind %d) skipped: the replay has no mesh path yet (%llu skipped so far)", m->kind, (unsigned long long)n);
                 break; }
