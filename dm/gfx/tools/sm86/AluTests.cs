@@ -671,6 +671,128 @@ static class AluTests
         }
     }
 
+    static uint ShfRef(uint lo, uint hi, uint s, int type, bool wrap, bool right, bool high)
+    {
+        int bits = type < 2 ? 64 : 32;
+        bool signed = type is 0 or 2;
+        int sh = (int)(wrap ? s & (uint)(bits - 1) : Math.Min(s, (uint)bits));
+        ulong x = lo | ((ulong)hi << 32);
+        ulong r;
+
+        if (right)
+        {
+            r = signed ? (ulong)((long)x >> Math.Min(sh, 63)) : sh >= 64 ? 0 : x >> sh;
+        }
+        else
+        {
+            r = sh >= 64 ? 0 : x << sh;
+        }
+
+        return high ? (uint)(r >> 32) : (uint)r;
+    }
+
+    // The family's wave-1 emitters: SHF in every type / direction / width, ISETP.EX, IMNMX, FMNMX with NaN, FMUL scales, and the C-slot forms.
+    static void AddShiftsCompares()
+    {
+        var rnd = new Random(19);
+        uint[] shifts = { 0, 5, 31, 32, 33, 63, 64, 70 };
+
+        for (int i = 0; i < 16; i++)
+        {
+            var t = New($"SHF.{i}");
+            uint lo = (uint)rnd.Next() | 0x80000001, hi = i % 2 == 0 ? 0x8000f00f : 0x0000f00f;
+            t.Ld(4, lo);
+            t.Ld(5, hi);
+
+            for (int r = 0; r < 4; r++)
+            {
+                int combo = i * 4 + r;
+                int type = combo & 3;
+                bool wrap = (combo & 4) != 0, right = (combo & 8) != 0, high = (combo & 16) != 0;
+                uint s = shifts[(combo >> 3) % shifts.Length];
+
+                if (r == 3)
+                {
+                    t.A.Alu(0x019, 4, r, 4, s, 5).F(73, 2, type).F(75, 1, wrap ? 1 : 0).F(76, 1, right ? 1 : 0).F(80, 1, high ? 1 : 0);
+                }
+                else
+                {
+                    t.Ld(8 + r, s);
+                    t.A.Alu(0x019, 1, r, 4, 8 + r, 5).F(73, 2, type).F(75, 1, wrap ? 1 : 0).F(76, 1, right ? 1 : 0).F(80, 1, high ? 1 : 0);
+                }
+
+                t.Expect[r] = ShfRef(lo, hi, s, type, wrap, right, high);
+            }
+        }
+
+        // 64-bit compares: ISETP.<cmp>.U32 on the low words, then ISETP.<cmp>.EX on the high words with that result (bits 68-71).
+        (ulong, ulong)[] pairs = { (5, 7), (0x1_0000_0000, 0xffff_ffff), (0xffff_ffff_0000_0001, 0x0000_0001_0000_0001), (42, 42) };
+
+        foreach (bool signed in new[] { false, true })
+        {
+            for (int cmp = 1; cmp < 7; cmp++)
+            {
+                var t = New($"ISETP.EX.{(signed ? "S" : "U")}.cmp{cmp}");
+
+                for (int r = 0; r < 4; r++)
+                {
+                    (ulong a, ulong b) = pairs[r];
+                    t.Ld(8, (uint)a);
+                    t.Ld(9, (uint)(a >> 32));
+                    t.Ld(10, (uint)b);
+                    t.Ld(11, (uint)(b >> 32));
+                    t.A.Alu(0x00c, 1, 0, 8, 10, 0).F(76, 3, cmp).F(68, 4, PT).F(81, 3, 0).F(84, 3, PT).F(87, 3, PT);
+                    t.A.Alu(0x00c, 1, 0, 9, 11, 0).F(76, 3, cmp).F(73, 1, signed ? 1 : 0).F(72, 1, 1).F(68, 3, 0).F(71, 1, 0).F(81, 3, 1).F(84, 3, PT).F(87, 3, PT);
+                    t.FromP(r, 1);
+                    long sa = (long)a, sb = (long)b;
+                    int c = signed ? sa.CompareTo(sb) : a.CompareTo(b);
+                    bool want = cmp switch { 1 => c < 0, 2 => c == 0, 3 => c <= 0, 4 => c > 0, 5 => c != 0, _ => c >= 0 };
+                    t.Expect[r] = want ? 1u : 0u;
+                }
+            }
+        }
+
+        {
+            var t = New("IMNMX.FMNMX");
+            t.Ld(4, 0xfffffff0u);
+            t.Ld(5, 7u);
+            t.A.Alu(0x017, 1, 0, 4, 5, RZ).F(73, 1, 1).F(87, 3, PT);                                         // signed min
+            t.A.Alu(0x017, 1, 1, 4, 5, RZ).F(87, 3, PT);                                                     // unsigned min
+            t.Ld(6, float.NaN);
+            t.Ld(7, -3f);
+            t.A.Alu(0x009, 1, 2, 6, 7, RZ).F(87, 3, PT).F(90, 1, 1);                                         // max(NaN, -3) = -3
+            t.A.Alu(0x009, 4, 3, 7, Bits(2f), RZ).F(73, 1, 1).F(87, 3, PT);                                  // min(|-3|, 2)
+            t.Expects(0xfffffff0u, 7u, Bits(-3f), Bits(2f));
+        }
+
+        {
+            var t = New("FMUL.FFMA.FSETP");
+            t.Ld(4, 3f);
+            t.Ld(5, 5f);
+            t.A.Alu(0x020, 1, 0, 4, 5, RZ).F(84, 3, 3);                                                      // FMUL.D2
+            t.A.Alu(0x020, 1, 1, 4, 5, RZ).F(84, 3, 6).F(77, 1, 1);                                          // FMUL.M4.SAT
+            t.Uld(8, Bits(-20f));
+            t.A.Alu(0x023, 7, 2, 4, 8, 5).F(91, 1, 1);                                                       // FFMA R4 * R5 + UR8 (form 7)
+            Sm86Asm.NoPreds(t.A.Alu(0x00b, 5, 0, 4, t.Cb(Bits(-3f)), 0)).F(76, 4, 2).F(62, 1, 1).F(81, 3, 3).F(90, 1, 0); // FSETP.EQ P3 = 3 == |-3|, PT
+            t.FromP(3, 3);
+            t.Expects(Bits(7.5f), Bits(1f), Bits(-5f), 1);
+        }
+
+        // C-slot forms: IMAD with C from c[0] (form 3) and from a uniform register (form 7), IADD3 with C immediate (form 2), HADD2 with a c[0] source.
+        {
+            var t = New("forms.C");
+            t.Ld(4, 6u);
+            t.Ld(5, 7u);
+            t.A.Alu(0x024, 3, 0, 4, t.Cb(100), 5).F(81, 3, PT).F(87, 3, PT).F(90, 1, 1);                     // R4 * R5 + c[0][x]
+            t.Uld(6, 1000u);
+            t.A.Alu(0x024, 7, 1, 4, 6, 5).F(81, 3, PT).F(87, 3, PT).F(90, 1, 1).F(91, 1, 1);                // R4 * R5 + UR6
+            Sm86Asm.NoPreds(t.A.Alu(0x010, 2, 2, 4, 0x10000, 5)).F(75, 1, 1);                                // R4 - R5 + 0x10000 (B neg in 64-71: bit 75)
+            t.Ld(7, H2(1f, 2f));
+            t.A.Alu(0x030, 3, 3, 7, t.Cb(H2(0.5f, 4f)), RZ).F(60, 2, 3);                                     // HADD2 R7, c[0][x].H1_H1
+            t.Expects(142, 1042, 0x10000 - 1, H2(5f, 6f));
+        }
+    }
+
     static void AddHalf()
     {
         // HADD2.F32 (the half to float conversion), HADD2 with swizzles and saturate, HMUL2.RELU.
@@ -783,6 +905,7 @@ static class AluTests
         AddInteger();
         AddFloat();
         AddHalf();
+        AddShiftsCompares();
 
         string spirvCross = Environment.GetEnvironmentVariable("SPIRV_CROSS") ?? FindSpirvCross();
         List<Test> tests = _tests.Where(t => filter == null || t.Name.Contains(filter)).ToList();
