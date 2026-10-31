@@ -77,6 +77,8 @@ The host serves all of it: [The Switch 2's `nn::codec` video decoders and image 
 
 There are no loose code areas: every program header in the RomFS and in main lies inside those containers. Keys are `sha256(control[0:0xd8] + code)[:16]`. `nvn2_dump.py` writes the programs to `$W/shader/sm86/` and a census to `$W/shader/sm86_census.tsv` (179 opcodes, 5.55 M instructions) for the SM86 work. The containers, control sections and keys are in [Switch 2 (NVN2) shader binaries](../../../docs/reference/shaders.md#switch-2-nvn2-shader-binaries).
 
+Full translation (chain d28a1605604e, translator 2057b672; [Switch 2 translation](../../../docs/reference/shaders.md#switch-2-translation)): 11,540 of the 11,567 programs have Metal libraries in `$W/shader/cache/b-d28a1605604e` (vertex 3,549 / 3,550, fragment 7,264 / 7,264, compute 727 / 728); the 7 task and 18 mesh programs are not translated, and 2 are dropped for a global memory access through a pointer (791fb7522aa03e61 load, 0459a55e79335cf6 store). `c1_full.tsv` (13 shaders not proven bounded) and `cb_extent.tsv` are in the profile folder, inputs stamp 1dd894ea18d6. A full build takes 30 min with an empty Metal cache, 3 min after a translator rebuild. The 5 bank-24 fullscreen programs bind NVN2 push block 0.
+
 ## Found on this game
 
 - [Switch 2 (NVN2) shader binaries](../../../docs/reference/shaders.md#switch-2-nvn2-shader-binaries): the split's containers and keys.
@@ -111,6 +113,7 @@ cd $W/run && DM_ROMFS=/Users/emanuel/Games/Switch/base/romfs DM_SAVE=$W/run/save
 
 - Sparse virtual textures (Nvn2Tex): the current stop, see [Graphics status](#graphics-status-wave-2).
 - Mesh and task shaders (7 + 18 programs, `ISBERD` / `ISBEWR`): not translated, their draws are skipped. The per-primitive shading rate index (`a[0x5c]`, written by 2,838 vertex programs) is dropped, so those draws shade at full rate; two programs reach global memory through a pointer read from a storage buffer (0459a55e79335cf6, 791fb7522aa03e61) and lose those accesses.
+- Compute reflection: 724 of the 727 compute libraries have slots the reflection cannot decode (NVN2 compute reads texture, image and storage-buffer bases from c[0] at program-specific offsets; the dispatch-time mapping in the sdk's token handler, `sdk+0x5c5280`, is not decoded), so the host refuses them (`[RED] shader <key>_b reflection conversion failed ... has no resolved slot number`).
 - Movies, output streams and the socket calls behind Pia are served but not met in a boot yet. Pia's network start (`main+0x22477b4`) stops at `nifm::IsNetworkAvailable` (false), before `nn::socket::internal::Initialize`; the SDK 19 socket overloads it would call next (`Socket(Family, Type, Protocol)`, `Bind(SockAddr)`, `SetSockOpt(Level, Option)`, `Close`, `EventFd*`, `GetPeerName(sockaddr)`, `GetAddrInfo` with resolver options, `Resolver{Get,Set}Option`, `IsInitialized`, `SetAllocator`) and `nn::ssl::Context::Create` (which returns 0xca7b without a service session) are not hooked.
 - AV1 movies: the host has no AV1 decoder (`InitializeAv1Decoder` fails with a red line); MKW has none.
 - The Switch 2's display: `oe::GetDefaultDisplayResolution` answers the Switch's 1920x1080 / 1280x720; MKW does not import it.
