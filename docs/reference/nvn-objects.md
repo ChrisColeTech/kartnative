@@ -16,6 +16,7 @@ The game allocates NVN objects with the sizes of *its* SDK's headers, which shra
 - **Fix:** keep `prog_t` at 112 bytes; per-program host data goes in a side table (`prog_key`).
 - **Found on:** SDK 16 games (`NVNtexture`, `NVNtextureView`); [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (`NVNprogram`).
 - **Check:** check every host object against the new SDK: `_Static_assert(sizeof(host) <= N)` next to the struct, and when a crash returns to a nonsense address, look at the 0x100 bytes below `sp` in the crash report for a zeroed frame.
+- **Switch 2 (NVN2):** the sizes Mario Kart World allocates are in [NVN2 object sizes at a glance](nvn2.md#object-sizes-at-a-glance). Bounds that are smaller than `nvn.h`'s: `NVNprogram` 0xA0, `NVNtexture` 0x80, `NVNtextureView` 0x10, `NVNsamplerBuilder` 0x40; larger: `NVNcommandBuffer` 0xC0, `NVNsampler` 0x40, `NVNqueue` 0x3000, `NVNwindow` 0x280. Today's host records fit all of them. NVN2 games also inline header fast paths that write `NVNcommandBuffer` internals, gated on the sdk data word `nvnPrivate0`, which must stay 0 ([How MKW fetches NVN2 functions](nvn2.md#how-mkw-fetches-nvn2-functions)).
 
 ### Inlined SDK code writes into `NVNcommandBuffer` +0x10
 
