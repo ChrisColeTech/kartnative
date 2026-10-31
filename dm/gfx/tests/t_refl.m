@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "dmsh_chain.h"   // dm/gfx/nvn (-I from the Makefile)
+#include "dmsh_abi.h"     // DMSH_C0P_KEY, DMSH_KIND_UNKNOWN
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -90,6 +91,23 @@ int main(void) { @autoreleasepool {
         check("B unknown kind fails", 1, nvn_refl_from_json(b1, &r, err, sizeof err) != 0);
         check("B texture without a resolved slot fails", 1, nvn_refl_from_json(b2, &r, err, sizeof err) != 0);
         printf("%-60s %s\n", "B negative control: unknown kind / missing slot", fail == f1 ? "✓" : "✗");
+    }
+    {   int f1 = fail;   // an NVN2 compute program's packed c0 (dmsh_abi.h DMSH_C0P_KEY): rows of push words, uniform / storage slots and handles, the shader's c0 read as a driver segment
+        NSArray *bs = @[@{@"kind": @"drvcb", @"bank": @0, @"arg_id": @0, @"msl_name": @"cp_c0", @"msl_type": @"constant _1*"},
+                        @{@"kind": @"sbuf", @"reg": @2, @"arg_id": @1, @"msl_name": @"cp_s0", @"msl_type": @"device _15*", @"rw": @YES}];
+        NSDictionary *j = @{@"route": @"B", @"bindings": bs, @DMSH_C0P_KEY: @{@"size": @0x60, @"rows": @[@[@"push", @1, @0x10, @3], @[@"sbuf", @0, @0x20, @3], @[@"tex", @128, @0x50, @2]]}};
+        check("c0 pack: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("c0 pack: size", 0x60, r.c0p_size); check("c0 pack: rows", 3, r.c0p_n); check("c0 pack: reads c0", 1, r.drv_read[0]);
+        check("c0 pack: push row kind", NVN_RB_PUSH, r.c0p[0].kind); check("c0 pack: push block", 1, r.c0p[0].reg); check("c0 pack: push words", 3, r.c0p[0].n);
+        check("c0 pack: storage row kind", NVN_RB_SBUFP, r.c0p[1].kind); check("c0 pack: storage row offset", 0x20, r.c0p[1].off);
+        check("c0 pack: separate texture row slot", 128, r.c0p[2].reg); check("c0 pack: storage binding slot", 2, r.b[1].reg);
+        NSDictionary *u = @{@"route": @"B", @"bindings": bs, @DMSH_C0P_KEY: @{@"size": @0x30, @"rows": @[@[@DMSH_KIND_UNKNOWN, @0, @0x10, @1]]}};
+        NSDictionary *o = @{@"route": @"B", @"bindings": bs, @DMSH_C0P_KEY: @{@"size": @0x30, @"rows": @[@[@"sbuf", @0, @0x10, @3]]}};
+        NSDictionary *p = @{@"route": @"B", @"bindings": bs, @DMSH_C0P_KEY: @{@"size": @0x30, @"rows": @[@[@"push", @7, @0x10, @65]]}};
+        check("c0 pack: an unplaceable row fails", 1, nvn_refl_from_json(u, &r, err, sizeof err) != 0);
+        check("c0 pack: a row past the size fails", 1, nvn_refl_from_json(o, &r, err, sizeof err) != 0);
+        check("c0 pack: push words past the area fail", 1, nvn_refl_from_json(p, &r, err, sizeof err) != 0);
+        printf("%-60s %s\n", "B NVN2 compute packed c0 rows (and refusals)", fail == f1 ? "✓" : "✗");
     }
     printf("== %d checks, %d failed, %d sample files missing (those checks skipped) ==\n", n, fail, skipped);
     return fail != 0;

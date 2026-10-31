@@ -109,6 +109,33 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (int i = 0; i < o->nb; i++) { if (o->b[i].kind == NVN_RB_DRV0) o->drv_read[0] = 1; else if (o->b[i].kind == NVN_RB_DRV2) o->drv_read[2] = 1; }
         NSArray *uf = j[@"drv_unfillable"];
         if ([uf isKindOfClass:[NSArray class]] && uf.count) FAIL("reads driver-bank locations at run time that the replay layer cannot fill: %s", [[uf componentsJoinedByString:@" "] UTF8String]);
+        NSDictionary *cp = j[@DMSH_C0P_KEY];   // an NVN2 compute program's own c0 layout (dmsh_abi.h): the header, then rows of bind state the host packs at each dispatch
+        if (cp) {
+            if (![cp isKindOfClass:[NSDictionary class]] || ![cp[@"rows"] isKindOfClass:[NSArray class]]) FAIL("%s is not {size, rows}", DMSH_C0P_KEY);
+            int size = [cp[@"size"] intValue]; NSArray *rows = cp[@"rows"];
+            if (size < DMSH_C0P_HEADER || size > DMSH_DRV_SIZE) FAIL("%s of %d bytes (%d to %d)", DMSH_C0P_KEY, size, DMSH_C0P_HEADER, DMSH_DRV_SIZE);
+            if (rows.count > NVN_REFL_MAXC0P) FAIL("%s has %lu rows, over the limit %d", DMSH_C0P_KEY, (unsigned long)rows.count, NVN_REFL_MAXC0P);
+            o->c0p_size = (uint16_t)size;
+            for (NSArray *rw in rows) {
+                if (![rw isKindOfClass:[NSArray class]] || rw.count != 4) FAIL("%s row is not [kind, reg, offset, n]", DMSH_C0P_KEY);
+                NSString *k = [rw[0] description]; int reg = [rw[1] intValue], off = [rw[2] intValue], n = [rw[3] intValue], kind, esz, lim;
+                // a push row is n words from block reg of the compute push area: DMSH_PUSH_SLOTS blocks of 64 words, contiguous as the driver's compute constant area is (a row may run into the next block)
+                if ([k isEqual:@DMSH_KIND_PUSH]) { kind = NVN_RB_PUSH; esz = 4; lim = reg < DMSH_PUSH_SLOTS ? reg + DMSH_PUSH_SLOTS * 64 - reg * 64 : 0; }   // reg + n ≤ lim: the words end inside the area
+                else if ([k isEqual:@DMSH_KIND_CBUF]) { kind = NVN_RB_CBUF; esz = DMSH_C0_ROW; lim = 16; }
+                else if ([k isEqual:@DMSH_KIND_SBUF]) { kind = NVN_RB_SBUFP; esz = DMSH_C0_ROW; lim = 16; }
+                else if ([k isEqual:@DMSH_KIND_TEX]) { kind = NVN_RB_TEX; esz = DMSH_C0P_HANDLE; lim = DMSH_SEPTEX_SLOT0 + 128; }
+                else if ([k isEqual:@DMSH_KIND_SAMP]) { kind = NVN_RB_SAMP; esz = DMSH_C0P_HANDLE; lim = 128; }
+                else if ([k isEqual:@DMSH_KIND_IMG]) { kind = NVN_RB_IMG; esz = DMSH_C0P_HANDLE; lim = 32; }
+                else if ([k isEqual:@DMSH_KIND_UNKNOWN]) FAIL("its packed c0 holds bind state the host has none of (a row of kind %s at byte %#x: an acceleration structure or a device message buffer)", DMSH_KIND_UNKNOWN, off);
+                else FAIL("%s row of kind %s not implemented", DMSH_C0P_KEY, k.UTF8String);
+                int bytes = kind == NVN_RB_PUSH ? (n * esz + DMSH_C0_ROW - 1) / DMSH_C0_ROW * DMSH_C0_ROW : n * esz;   // push rows are padded to the next DMSH_C0_ROW
+                if (n < 1 || n > 255 || reg < 0 || off < DMSH_C0P_HEADER || off + bytes > size || reg + n > lim)
+                    FAIL("%s row %s reg %d offset %#x n %d outside the slots or the %d bytes", DMSH_C0P_KEY, k.UTF8String, reg, off, n, size);
+                o->c0p[o->c0p_n++] = (nvn_c0p_row){(uint8_t)kind, (uint8_t)n, (uint16_t)reg, (uint16_t)off};
+            }
+        }
+        id sp = j[@DMSH_SPILL_KEY];   // threadgroup memory past Metal's 32 KB, moved to a device buffer of this many bytes per threadgroup (nvn_mtl.m dispatch binds it)
+        if (sp) { if (![sp isKindOfClass:[NSNumber class]] || [sp longLongValue] <= 0 || [sp longLongValue] > (1 << 20)) FAIL("%s of %s bytes", DMSH_SPILL_KEY, [[sp description] UTF8String]); o->spill = [sp unsignedIntValue]; }
         NSString *c1 = j[@"c1"];
         if (c1.length % 2 || c1.length / 2 > 0xffff) FAIL("c1 is %lu bytes: over the limit or an odd hex length", (unsigned long)c1.length / 2);
         if (c1.length && !(o->c1 = malloc(c1.length / 2))) FAIL("c1 allocation of %lu bytes failed", (unsigned long)c1.length / 2);

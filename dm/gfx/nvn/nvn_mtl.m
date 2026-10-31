@@ -1612,7 +1612,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[143];
+static int g_red_once[145];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4770,6 +4770,7 @@ static struct {
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     uint8_t push[DMSH_PUSH_SLOTS][PUSH_BLOCK];   // NVN2 graphics push-constant blocks (OP_PUSH_CONST), GPU state of the queue as Ampere's root tables are; bound as NVN_RB_PUSH (encode_args)
+    uint8_t cpush[DMSH_PUSH_SLOTS * PUSH_BLOCK];   // NVN2 compute push constants (PushComputeConstants): the driver's compute constant area, block k at byte 256 k; packed into c0 (encode_args)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S;
 // The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
@@ -7143,6 +7144,26 @@ static void c0_sample_rows(uint8_t *d, uint32_t samples) {
     memcpy(d + DMSH_C0_SAMPLE_TABLE, table[samples], DMSH_C0_SAMPLE_BYTES); memcpy(d + DMSH_C0_SAMPLE_INFO, info, sizeof info);
 }
 static uint64_t g_geo_bind[5];
+// An NVN2 compute program's own c0 (dmsh_abi.h DMSH_C0P_KEY), as the driver packs it from the compute bind state at each dispatch (packer sdk+0x5ebbb0, called from the dispatch
+// builder sdk+0x5eb2b0): u32 0 and the workgroup counts, then each row's entries. Handles go in as the game bound them: bind_handles (hle_nvn.c) moved their IDs to the bound pool's
+// part of the host table, which is taken off again, and kept the 32 bits the GPU reads (texture ID in bits 0-19, sampler ID from bit 20; an image handle is a texture ID)
+static void c0p_fill(uint8_t *d, const nvn_refl *rf, id<MTLBuffer> db, size_t doff) {
+    memcpy(d + 4, g_dispatch_dim, 12); g_c0_dim_buf = db; g_c0_dim_off = doff + 4;   // an indirect dispatch copies its GPU-written counts there (dispatch)
+    for (int i = 0; i < rf->c0p_n; i++) {
+        const nvn_c0p_row *w = &rf->c0p[i]; uint8_t *e = d + w->off;
+        if (w->kind == NVN_RB_PUSH) { memcpy(e, S.cpush + PUSH_BLOCK * w->reg, 4u * w->n); continue; }   // nvn_refl.m checked the words end inside the area, and the row's padding stays 0
+        for (unsigned k = 0; k < w->n; k++) {
+            unsigned r = w->reg + k;
+            if (w->kind == NVN_RB_CBUF || w->kind == NVN_RB_SBUFP) {
+                const p_bind_buf *u = w->kind == NVN_RB_CBUF ? &S.ubo[5][r] : &S.ssbo[5][r]; uint32_t n = (uint32_t)u->size;
+                memcpy(e + DMSH_C0_ROW * k, &u->addr, 8); memcpy(e + DMSH_C0_ROW * k + 8, &n, 4); continue; }
+            uint64_t h = w->kind == NVN_RB_TEX ? S.tex[5][r] : w->kind == NVN_RB_SAMP ? S.samp[5][r] : S.img[5][r], tid = h & 0xfffff, sid = h >> 20 & 0xfff;
+            if (tid >= (uint64_t)S.tex_base) tid -= (uint64_t)S.tex_base;
+            if (sid && w->kind != NVN_RB_IMG && sid >= (uint64_t)S.samp_base) sid -= (uint64_t)S.samp_base;
+            h = tid | sid << 20; memcpy(e + DMSH_C0P_HANDLE * k, &h, 8);
+        }
+    }
+}
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
@@ -7346,7 +7367,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!sh->rf.drv_read[bank]) { slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); }
             else {
                 id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_DRV_SIZE, &db); uint8_t *d = (uint8_t *)db.contents + doff; memset(d, 0, DMSH_DRV_SIZE);
-                if (bank == 0) {
+                if (bank == 0 && sh->rf.c0p_size && nvn_stage == 5) {   // an NVN2 compute program: c0 has the layout its reflection gives
+                    c0p_fill(d, &sh->rf, db, doff);
+                    if (bl) { uint32_t w[4]; memcpy(w, d, 16); PD("B %llu st%d c0p size=%#x rows=%d dims=%u,%u,%u", g_stat_pass, nvn_stage, sh->rf.c0p_size, sh->rf.c0p_n, w[1], w[2], w[3]); }
+                } else if (bank == 0) {
                     int base = c0_ssbo_base(nvn_stage);
                     if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
                     else for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4); }
@@ -7689,15 +7713,16 @@ static int state_op(uint32_t op, const void *a) {
         case OP_TF_STATE: { const p_tf_state *b = a; S.tf_on = b->what == 0 || b->what == 3; break; }
         case OP_PRIM_RESTART: S.restart = *(const p_prim_restart *)a; break;
         case OP_RAST_DISCARD: S.rast_discard = ((const p_rast_discard *)a)->on; g_pso_dirty = 1; break;
-        // NVN2 push constants (nvn2_cmd.h): graphics block slot, which SM86 programs read as constant bank DMSH_PUSH_BANK0 + slot. Compute pushes land in the compute constant area
-        // (word slot * 64 + offset / 4 + 0x48, sdk+0x5d3a30) of a bank no SM86 compute program has been seen to read; Mario Kart World never pushes compute constants
+        // NVN2 push constants (nvn2_cmd.h): graphics block slot, which SM86 programs read as constant bank DMSH_PUSH_BANK0 + slot. Compute pushes write the driver's compute constant
+        // area (block slot at word slot * 64, sdk+0x5d3a30; one contiguous area, a push past its block goes on into the next), from which the driver packs the words a program's c0
+        // layout names at each dispatch (dmsh_abi.h DMSH_C0P_KEY, encode_args)
         case OP_PUSH_CONST: {
-            const p_push_const *pc = a;
-            if (pc->flags & PUSH_COMPUTE) { RED_ONCE(140, "compute push constants (PushComputeConstants): the constant bank SM86 compute programs read them from is not established; dropped"); break; }
+            const p_push_const *pc = a; int cs = pc->flags & PUSH_COMPUTE;
             const uint8_t *src = pc->data;
             if (pc->flags & PUSH_DEFERRED) { uint64_t s; memcpy(&s, pc->data, 8); src = (const uint8_t *)(uintptr_t)s; if (!src) break; }   // read now, as the driver reads it at submit
-            uint32_t n = pc->offset < PUSH_BLOCK ? MIN(pc->size, PUSH_BLOCK - pc->offset) : 0; uint8_t *d = S.push[pc->slot % DMSH_PUSH_SLOTS] + pc->offset;
-            if (n && memcmp(d, src, n)) { memcpy(d, src, n); for (int st = 0; st < 5; st++) g_args_dirty[st] = 1; }
+            uint32_t at = cs ? (uint32_t)(pc->slot % DMSH_PUSH_SLOTS) * PUSH_BLOCK + pc->offset : pc->offset, lim = cs ? sizeof S.cpush : PUSH_BLOCK;
+            uint32_t n = at < lim ? MIN(pc->size, lim - at) : 0; uint8_t *d = cs ? S.cpush + at : S.push[pc->slot % DMSH_PUSH_SLOTS] + at;
+            if (n && memcmp(d, src, n)) { memcpy(d, src, n); if (cs) g_args_dirty[5] = 1; else for (int st = 0; st < 5; st++) g_args_dirty[st] = 1; }
             break; }
         default: return 0;
     }
@@ -10000,6 +10025,15 @@ static void dispatch(const p_dispatch *dp) {
     }
     const uint16_t *tg = cs->rf.tg;
     if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
+    // Threadgroup memory past Metal's 32 KB, which the build moved to a device buffer (dmsh_abi.h DMSH_SPILL_*): one slice per threadgroup of this dispatch, from the submission
+    // arena (a dispatch of its own, so two dispatches never share slices; above ARENA_KEEP it is scratch released when idle). Mario Kart World: 168 programs of 48 KB
+    uint64_t spill_n = 0;
+    if (cs->rf.spill) {
+        if (dp->ind) { RED_ONCE(143, "indirect dispatch of %s, whose shared memory lives in a device buffer sized by the threadgroup count: skipped (the count is known only on the GPU)", cs->key); return; }
+        spill_n = (uint64_t)cs->rf.spill * (uint64_t)dp->x * (uint64_t)dp->y * (uint64_t)dp->z;
+        if (!spill_n) return;   // no threadgroups
+        if (spill_n > (1ull << 30)) { RED_ONCE(144, "dispatch of %s needs %llu MiB of device memory for its shared memory (%u bytes x %dx%dx%d threadgroups): skipped", cs->key, (unsigned long long)(spill_n >> 20), cs->rf.spill, dp->x, dp->y, dp->z); return; }
+    }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_end();
     image_prepare(prog_get(S.cprog), 0x20);
@@ -10010,6 +10044,7 @@ static void dispatch(const p_dispatch *dp) {
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);
+    if (spill_n) { id<MTLBuffer> sb; size_t so = arena_alloc((size_t)spill_n, &sb); enc_c_args(ce, sb.gpuAddress + so, DMSH_SPILL_BUFFER); }   // no initial content: shared memory starts undefined
     if (dp->ind) {   // The shader reads the group counts from c0 + 0x200: copy the GPU-written ones there first (Metal 4 orders nothing inside an encoder without a barrier)
         if (g_c0_dim_buf) { [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off size:12];
             [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()]; }

@@ -27,6 +27,7 @@ enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                             
 #define NVN_REFL_MAXB 128
 #define NVN_REFL_MAXARG 768   // argument buffer entries of one shader (an array binding takes n of them; a c2 handle array 301, with its samplers 602)
 #define NVN_REFL_MAXV 32
+#define NVN_REFL_MAXC0P 16    // rows of an NVN2 compute program's packed c0 (one per kind of bind state it reads, a push row per block; Mario Kart World has at most 6)
 
 typedef struct {
     uint8_t kind, rw;        // rw: storage buffer access is read_write / write / device
@@ -39,6 +40,9 @@ typedef struct {
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_build.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
 } nvn_rbind;
+// One row of an NVN2 compute program's packed c0 (dmsh_abi.h DMSH_C0P_KEY): n entries for slots reg .. reg + n - 1 from byte off. kind: NVN_RB_PUSH (words of the compute push
+// area from block reg), NVN_RB_CBUF / NVN_RB_SBUFP (uniform / storage slots, {address, size}), NVN_RB_TEX / NVN_RB_SAMP / NVN_RB_IMG (the bound handles)
+typedef struct { uint8_t kind, n; uint16_t reg, off; } nvn_c0p_row;
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count
     nvn_rbind b[NVN_REFL_MAXB];
@@ -61,6 +65,9 @@ typedef struct {
     uint8_t nfc, fc_reg[32], fc_locn[32], nfo, fo_color[4]; uint64_t fc_mixed[4]; int8_t uv_attr[32];   // fc_mixed: a bit per texture slot 0-255 (slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0)
     // Vertex - .x / .y of interpolated output locn = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset), where scale / offset reference a uniform: (slot << 8) | (vector << 2) | component
     int8_t uv_aff_attr[32]; uint16_t uv_aff[32][4];   // [sx, ox, sy, oy]
+    uint16_t c0p_size;       // NVN2 compute: bytes of the program's packed c0 (0 = none: c0 has the Switch 1 driver's layout); rows c0p[0 .. c0p_n - 1] (nvn_mtl.m encode_args)
+    uint8_t c0p_n; nvn_c0p_row c0p[NVN_REFL_MAXC0P];
+    uint32_t spill;          // compute: bytes of one threadgroup's slice of the shared memory the build moved to a device buffer (dmsh_abi.h DMSH_SPILL_KEY; 0 = none)
     uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
 } nvn_refl;
 
