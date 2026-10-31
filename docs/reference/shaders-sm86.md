@@ -35,6 +35,16 @@ Uniform registers UR0-UR62 (UR63 = URZ) and predicates UP0-UP6 (UP7 = UPT) are t
 - BSSY, BSYNC, BREAK, WARPSYNC: convergence only, nothing to emit for a per-invocation translation (control flow itself is the BRA / CALL that follows). KILL is a discard and ends its block (the IR's discard terminates it).
 - EXIT inside a called function and RET in the main function log "is not implemented" (a Ryujinx function cannot end the invocation); no MKW program has either (0 of 11,542).
 
+## ALU semantics
+
+Fields follow NAK's encoder; results follow NAK's hardware-tested constant folds (`ir.rs`, checked against the GPU by `hw_tests.rs`) and PTX where NAK has none.
+
+- Conversions: destination size bits 75-76 and source size 84-85 (0 = 8, 1 = 16, 2 = 32, 3 = 64 bits; 64-bit operands use 0x110-0x113 and are register pairs), rounding 78-79 (nearest even, down, up, zero). F2I: signed bit 72, .NTZ bit 77 (on every MKW F2I): saturating, NaN to 0. I2F: signed bit 74; an 8- or 16-bit source is the byte or half bits 60-61 select, in units of its size. I2FP (0x045) is I2F on the FP32 pipe; MKW uses I2FP.U32.RZ 8,600 times (a hash to [0, 1)), so directed roundings are exact (the magnitude truncated to 24 bits, plus one unit when bits were dropped). F2FP.PACK_AB puts A in the high half.
+- IADD3's carry outputs (81-83, 84-86) are the exact sum's bits above 31 (at least one carry, at least two), wherever they occur; .X inverts (~x) instead of negating. LEA: shift 75-79, .HI 80, .X 74, carry out 81-83, carry in 87-90, bit 73 .SX32 (A sign-extended into the high word; 221 MKW instructions). IMAD.X adds a carry-in; IMAD.HI is PTX mad.hi; IMAD.WIDE writes a pair.
+- FLO gives 0xffffffff when no bit is found, also with .SH (PTX bfind). PRMT: mode 72-74; MKW only uses index mode with immediate selectors, which become shifts and masks.
+- FSET with no extra bits is FSET.BF (1.0 / 0.0). FSWZADD: lane codes in bits 32-39, lane 0 in 38-39; codes 1 / 2 are A - B / B - A (Ryujinx's Maxwell SwizzleAdd has them the other way round, so the emitter maps them). MUFU SIN / COS take turns (the compiler multiplies by 1 / 2 pi with FMUL.RZ first).
+- F16x2: swizzles at 74-75 (A), 60-61 (32-bit slot), 81-82 (C register; its abs / neg move to 83 / 84): 0 both halves, 1 an F32 value, 2 low half twice, 3 high half twice. Two-source F16x2 operations take the second source from the 32-bit slot in every form. .F32 (bit 78) writes lane 0 as an F32 (MKW converts halves with HADD2.F32 -RZ, x.H0_H0). HSET2 / HSETP2 keep their combine (69-70) and .BF / .H_AND (71) in bits 64-71.
+
 ## Notes that drop a program
 
 The chain gives a program no library ("SM86 incomplete") when a translator note matches `Unsupported SM86 instruction|is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at|Failed to find storage buffer for global memory operation` (`dmsh_build.py` `SM86_BLOCKING`); the harness counts completeness with the same rule. An emitter that cannot translate a variant logs "... is not implemented"; an approximation that still runs (for example a value read at the pixel centre) must not use those words.
@@ -73,7 +83,11 @@ Implemented in `Sm86Emit.{Mem,Tex,Surface}.cs` (rows in `Sm86InstTable.{Mem,Tex}
 | `Sm86InstTable.cs` | the 4096-entry opcode table, its props and form flags, the registration helpers |
 | `Sm86InstTable.{Alu,Mem,Tex,Flow,Warp}.cs` | one family's table rows each |
 | `Sm86Emit.cs` | shared operand helpers |
-| `Sm86Emit.{Alu,Mem,Tex,Flow,Warp}.cs` | one family's emitters each; `Sm86Emit.Tensor.cs` (HMMA / LDSM / MOVM), `Sm86Emit.Surface.cs` (surface emitters of the texture family), `Sm86Emit.AluConv.cs` / `AluHalf.cs` (conversions, half-float operations) |
+| `Sm86Emit.{Alu,Mem,Tex,Flow,Warp}.cs` | one family's emitters each |
+| `Sm86Emit.AluConv.cs` | the ALU family's conversions (F2I, I2F / I2FP, F2F, FRND, F2FP) and its helpers (64-bit register pairs, `CheckModifiers`) |
+| `Sm86Emit.AluHalf.cs` | the ALU family's F16x2 operations |
+| `Sm86Emit.Tensor.cs` | HMMA / LDSM / MOVM (warp family) |
+| `Sm86Emit.Surface.cs` | surface (image) emitters of the texture family (rows in `Sm86InstTable.Tex.cs`) |
 | `Sm86Decoder.cs`, `Sm86Flow.cs` | blocks, functions, branch / call / BRX / BRXU targets |
 | `Sm86Translator.cs` | per-block emission and guards |
 
@@ -84,7 +98,7 @@ To add an opcode:
 3. Write the emitter in the family's `Sm86Emit` file: `Inst(context)` gives the instruction; `Src(context, inst, Slot.A|B|C)`, `SecondSlot(inst)`, `FpSrc` / `IntSrc` (modifiers applied), `SrcCbuf`, `Gpr` / `UGpr` / `Pred` / `UPred`, `PredSrc`, `SetDest` (GPR or UR by the row's `Uniform`), `SetPredDest`. Reuse a Maxwell emitter through decoded fields when the semantics are the same (`InstEmit.EmitLdc`, `EmitAld`, `EmitAst`, `EmitIpa`, `EmitLoadSpecialRegister`, `EmitBrx`); unimplemented variants log through `GpuAccessor.Log` and emit nothing.
 4. Check with the harness (below) on the hand set and on the dump programs that use the opcode, and run `fuzz-maxwell` if a shared file changed.
 
-The ALU + conversion family (`*.Alu*.cs`) covers I2FP, F2I, I2F, FRND, FSET, LEA, IABS, PRMT, F2F / F2FP, POPC, FLO, SGXT, BREV, IMAD.WIDE / .HI / .X, the half-float operations and their uniform variants.
+ALU + conversion (`*.Alu*.cs`): every ALU and conversion opcode of the MKW census translates (I2FP, F2I, I2F, FRND, F2F, F2FP, FSET, LEA / ULEA, IABS, PRMT / UPRMT, FLO, POPC, BREV, SGXT, BMSK, IMAD.WIDE / .HI / .X, IDP.4A, FSWZADD, MUFU.F16 / TANH, HADD2 / HMUL2 / HFMA2 / HSET2 / HSETP2 / HMNMX2, and the uniform rows UFLO, UBREV, UPOPC, UIMAD.WIDE, USGXT, UBMSK). Emitters log modifier bits they do not model (`CheckModifiers`); no MKW program logs one.
 
 ## Tests
 
@@ -92,7 +106,8 @@ The harness is `dm/gfx/tools/sm86` (C#; build outside the repository, e.g. `dotn
 
 - `translate <out dir> [--msl] [--metal] [--all] [--jobs N] [--complete <list>] <program.bin | dir>...` translates SM86 programs (stage from `<key>.meta.json`, c[1] from `<key>.c1.bin`) to SPIR-V, MSL through `spirv_cross_bin` (the chain's options) and AIR through `xcrun metal`, with the translator's notes per program. A directory stands for every program in it; task and mesh programs are skipped. The summary counts complete programs (no note that drops a program, above) per stage and lists the opcodes and notes that keep the others out; MSL / AIR are made for complete programs, or for all with `--all`. The whole MKW dump: `translate <out> --jobs 6 --metal $W/shader/sm86` (about 16 minutes).
 - `hand <out dir>` writes hand-encoded programs (`Sm86Programs.cs`) covering uniform chains, predicates, BSSY / BSYNC, a BRX table and a CALL.REL.NOINC / RET pair.
-- `warp <out dir> <alu_run>` runs the warp and tensor tests (`WarpTests.cs`) on the Mac GPU: hand-encoded fragment programs render 8x4 pixels (one SIMD group; the test checks every lane id appears once) through `alu_run` (`alu_run.swift`; `xcrun swiftc -O dm/gfx/tools/sm86/alu_run.swift -o $W/sm86/alu_run`), and their R0-R2 are compared with a C# model of the warp, with and without DebugMode. `alu <out dir> <alu_run> ...` runs the ALU tests (`AluTests.cs`) the same way.
+- `warp <out dir> <alu_run>` runs the warp and tensor tests (`WarpTests.cs`) on the Mac GPU: hand-encoded fragment programs render 8x4 pixels (one SIMD group; the test checks every lane id appears once) through `alu_run`, and their R0-R2 are compared with a C# model of the warp, with and without DebugMode.
+- `alu <out dir> <alu_run> [--math safe|relaxed|fast] [--filter s] [--jobs N]` runs 243 hand-encoded fragment programs over the ALU family (`AluTests.cs`) on the Mac's GPU: inputs come from c[0] so nothing folds, `alu_run.swift` (build it with `xcrun swiftc -O dm/gfx/tools/sm86/alu_run.swift -o $W/sm86/alu_run`) renders the program's MSL offscreen into an RGBA32Uint target and the four words are compared with reference values. All pass in the three Metal math modes (the chain compiles with fast on the Mac and relaxed on iOS).
 - `fuzz-maxwell <InstTable.cs> <count> <seed> <out>` digests random Maxwell programs (SPIR-V without DebugMode, GLSL with it); build the harness once against the current translator and once with `-p:Baseline=true -p:RyuSrc=<older copy>`, and compare the outputs: a change to shared translator files must leave them identical, or explain each difference.
 
 Status (2026-10-31, MKW 1.0.0): every opcode of the 11,542 non-task / mesh programs translates, and all of them compile through MSL to AIR with `xcrun metal` (3,550 vertex, 7,264 fragment, 728 compute); under the drop rule above 11,540 are complete (3,449 before wave 2): the two programs with a global-memory access through a pointer (below) are dropped. `warp`: 20 of 20 pass. Maxwell: 5 x 10,000 random programs are identical before and after the wave-2 frontend work, except the AST-optimizer fix (below), which only changes SPIR-V without DebugMode.
@@ -109,3 +124,7 @@ Status (2026-10-31, MKW 1.0.0): every opcode of the 11,542 non-task / mesh progr
 - The IR has 32-bit integer atomics only: F32 / F16x2 / 64-bit atomics and INC / DEC are rejected (not in MKW).
 - Without DebugMode the AST optimizer propagated constants into SPIR-V call arguments (passed by pointer: `KeyNotFoundException` in `GetLocalPointer`, every SHFL with an immediate lane or c) and moved a call past reads of its out arguments; `AstOptimizer` now keeps both. The chain translates with DebugMode by default.
 - The IR's shuffles carry 32-bit values as f32 (`GroupNonUniformShuffle` on FP32), as for Maxwell; MATCH compares the shuffled bits.
+- FADD / FMUL / FFMA rounding modes and FTZ are not modelled (the IR has none); MKW has FMUL.RZ 96,356 times (mostly before MUFU), FADD.RM 1,022 and FFMA.RZ 479: at most one unit in the last place.
+- Metal flushes FP32 denormals, so a directed rounding of a denormal (F2I.CEIL of 1e-40: 1 on the GPU) gives 0.
+- 64-bit float conversions and MUFU.RCP64H / RSQ64H become FP64 IR, which Metal cannot compile; MKW has none.
+- F2I without .NTZ takes its NaN result from a dispatch setting on the console (0 or 0x80000000); 0 is used. MKW has none.
