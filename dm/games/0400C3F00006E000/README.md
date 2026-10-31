@@ -43,8 +43,21 @@ The host's NVN reports 55.15, so `nnMain` leaves its graphics setup at `main+0xc
 
 `DM_NVN_API=231.16` (an existing diagnostic switch, no code change) makes the NVN1 implementations answer the version check, to see what comes after it. That runs NVN2 calls through NVN1 implementations of unverified ABI: what it shows about graphics is a list of names, not behaviour. The calls that followed, in order: `nvnDeviceGetInteger` items 0x2a, 0x5a, 0xf, 0x10, 0x11, 0x12, 0x55, 0x14, 0x19, 0x1a, 0x18; a 0x423000-byte memory pool (flags 0x22); a sampler pool of 4096 and a texture pool; `nvnQueueInitialize` (after `nvnQueueBuilderSetPrimaryQueue`, unimplemented); a 0x2d00000-byte pool and three 2560x1440 textures (format 0x25) for a three-texture window at interval 1; buffers; `nvnProgramBuilderSetDefaults` / `SetDevice` / `SetShaders` and `nvnProgramInitializeFromBuilder` (unimplemented); then from the frame threads `nvnCommandBufferSetRecordingMode`, `SetGeometryProcessingMode`, `SetStencilCullCriteria`, `ShadingRateImagePalette`, `BindShadingRateImage`, `PushGraphicsConstants`, `SetComputeOverlapMode` and `DrawMeshTasks` (all unimplemented). Every non-graphics call on that path was answered; the run ended in the host's shader hashing (`keys_hash` from `nvnQueueSubmitCommands`, reading a program through the NVN1 layout).
 
+## Shaders
+
+`shader_split.py` finds 11,567 distinct NVN2 programs (3,550 vertex, 7,264 pixel, 728 compute, 7 task, 18 mesh) in 3.5 min:
+
+- `Shader/*.bfsha` (BNSH), and the Drive sarc's two BAHS 11 `sharcb`, which hold every compute, task and mesh program of the drive passes;
+- 79 Layout `blarc` BNSH;
+- the Effect `esetb`'s two BNSH (3,136 programs);
+- `Lib/`: agl, gsys, Terrain and Visualizer BAHS; `agl_ndsr.pck` (30 HMMA compute stages and 3 programs); sead's 6 font and primitive stages, which embed SPIR-V;
+- main's two BNSH (40 programs).
+
+There are no loose code areas: every program header in the RomFS and in main lies inside those containers. Keys are `sha256(control[0:0xd8] + code)[:16]`. `nvn2_dump.py` writes the programs to `$W/shader/sm86/` and a census to `$W/shader/sm86_census.tsv` (179 opcodes, 5.55 M instructions) for the SM86 work. The containers, control sections and keys are in [Switch 2 (NVN2) shader binaries](../../../docs/reference/shaders.md#switch-2-nvn2-shader-binaries).
+
 ## Found on this game
 
+- [Switch 2 (NVN2) shader binaries](../../../docs/reference/shaders.md#switch-2-nvn2-shader-binaries): the split's containers and keys.
 - [A vector register taken for the jump table index](../../../docs/reference/rewriter.md#a-vector-register-taken-for-the-jump-table-index): the rewrite of `main` stopped at `main+0xea4a8`.
 - [Switch 2 code: the instructions capstone 5 leaves undecoded](../../../docs/reference/rewriter.md#switch-2-code-the-instructions-capstone-5-leaves-undecoded). The modules read only `cntpct_el0` among the counters (40 gates in `sdk`), no `cntfrq` / `cntvct` / ID registers; one MTE `stg` in `sdk` (`sdk+0x74c160`, libunwind's stack retag, behind a flag).
 - [The Switch 2's 31.25 MHz system counter](../../../docs/reference/services.md#the-switch-2s-3125-mhz-system-counter) (found from the sdk before the first boot).
