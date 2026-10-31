@@ -707,7 +707,26 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         regs[0] = 0; regs[1] = v; return 0;
     }
-    default:
+    // SetGpuMemoryAttribute(address, size, mask, attr), the Switch 2 kernel's svc 0x80 (main.npdm grants it): nn::gpu::sdk::CreateGpuAccessibleMemory sets GpuAccessible (0x20) before it
+    // registers memory with the GPU and DestroyGpuAccessibleMemory clears it (sdk+0x17b344, called from sdk+0x3d0af8 / +0x3d0d54 in Mario Kart World 1.0.0), as do nn::gs native memories.
+    // The arguments are checked in the kernel's order (address alignment, size, the attribute combination, the range); the host's GPU sees all guest memory at its CPU address (NVN on
+    // Metal), so there is nothing to map, and QueryMemory does not report the attribute (no host code reads it)
+    case 0x80: if (!DM_GAME_SWITCH2) goto unknown; {
+        uint64_t addr = regs[0], size = regs[1]; uint32_t mask = (uint32_t)regs[2], attr = (uint32_t)regs[3];
+        if (addr & 0xfff) regs[0] = 0xCC01;
+        else if (!size || (size & 0xfff)) regs[0] = 0xCA01;
+        else if ((attr & ~mask) || ((mask | attr) & ~0x20u)) regs[0] = 0xE801;
+        else if (addr + size < addr || !(dm_guest_as_contains(addr) || module_of((void *)(uintptr_t)addr)) || !(dm_guest_as_contains(addr + size - 1) || module_of((void *)(uintptr_t)(addr + size - 1)))) regs[0] = 0xD401;
+        else regs[0] = 0;
+        if (g_flag.svc) LOG("SetGpuMemoryAttribute %#llx+%#llx mask %#x attr %#x -> %#llx", (unsigned long long)addr, (unsigned long long)size, mask, attr, (unsigned long long)regs[0]);
+        return 0;
+    }
+    // nn::dd::Lock / UnlockGpuShareableMemory's svcs (0x81 returns three values: the SDK stores x1 as the physical address and x3 beside the virtual range, sdk+0x9c830). Mario Kart World's
+    // NPDM does not grant them and nothing in its modules calls those two functions; the host has no physical addresses to give
+    case 0x81: case 0x82: if (!DM_GAME_SWITCH2) goto unknown;
+        if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("[RED] svc %#x (nn::dd::%sGpuShareableMemory): no physical memory on the host, NotImplemented", num, num == 0x81 ? "Lock" : "Unlock"); }
+        regs[0] = 0xF001; return 0;
+    default: unknown:
         if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (placeholder returns success)", num, regs[0], regs[1], regs[2]); }
         regs[0] = 0; return 0;
     }
