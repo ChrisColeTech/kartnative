@@ -34,6 +34,11 @@ static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint64_t *g_alias_exposed;   // one bit per host page ever opened; protected by g_map_lock
 static uint8_t *g_stack; static size_t g_stack_cap;
+// The Switch 2 kernel's remote region (GetInfo 29 / 30): the SDK's nn::os RemoteRegionManager hands addresses out of it for memory shared with the graphics server
+// (nnosInitialize builds an AddressSpaceAllocator over [29, 29 + 30), sdk+0x14e4f0 in Mario Kart World 1.0.0). The host takes nn::gs::sdk::BootGraphicsSystem's caller
+// nv::InitializeGraphics over (hle_nv.c), so nothing is mapped there; the region is reserved address space after the heap, which no other region overlaps
+#define REMOTE_SIZE (DM_GAME_SWITCH2 ? 0x100000000ull : 0)
+static uint8_t *g_remote;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
@@ -50,7 +55,7 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
-    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    g_as = mmap(NULL, g_reserve + REMOTE_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
@@ -61,6 +66,7 @@ static void mem_init_once(void) {
     g_alias = g_as + 0x10000000; g_alias_cap = alias;
     g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
     g_heap  = g_stack + g_stack_cap; g_heap_cap  = g_reserve - (size_t)(g_heap - g_as);
+    g_remote = g_as + g_reserve; g_reserve += REMOTE_SIZE;   // past the heap region: free address space in QueryMemory, inside the ASLR region (GetInfo 12 / 13)
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
@@ -93,7 +99,9 @@ void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_res
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
        I_AslrAddr=12, I_AslrSize=13, I_StackAddr=14, I_StackSize=15, I_SysResTotal=16, I_SysResUsed=17,
-       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24 };
+       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24,
+       // the Switch 2 kernel's (Mario Kart World's SDK 19.3.3): the remote region, the remote memory nn::os::GetRemoteMemoryUsage reads, the page granule
+       I_RemoteAddr=29, I_RemoteSize=30, I_RemoteMemSize=31, I_RemoteMemUsed=32, I_PageGranule=33 };
 
 static uint8_t g_seen[256];
 
@@ -662,7 +670,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     case 0x29: {  // GetInfo(out*, id, handle, subid) → x1 = value
         uint64_t id = regs[1], v = 0;
         switch (id) {
-        case I_CoreMask: v = 7; break;
+        // the cores the NPDM's ThreadInfo capability allows: 0-2 on the Switch, 0-5 on the Switch 2 (Mario Kart World's main.npdm: cores 0..5, priorities 28..59); the SDK's
+        // ThreadManager::GetThreadAvailableCoreMask asks it, and job systems start a worker per core
+        case I_CoreMask: v = DM_GAME_SWITCH2 ? 0x3f : 7; break;
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
@@ -686,7 +696,14 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)
         case I_FreeThreadCount: { int thr_limit_used(void); int u = thr_limit_used(); v = u < 96 ? 96 - u : 0; break; }
         case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
-        default: v = 0; break;
+        case I_RemoteAddr: v = DM_GAME_SWITCH2 ? (uint64_t)g_remote : 0; break;   case I_RemoteSize: v = REMOTE_SIZE; break;
+        // remote memory (the graphics server's): nn::os::GetRemoteMemoryUsage returns {31, 32}, which nn::gs::sdk::BootGraphicsSystem and nn::gsv / nn::nvsrv's BootWithRemoteMemory
+        // read; the host runs no graphics server (nv::InitializeGraphics is taken over), so there is none
+        case I_RemoteMemSize: case I_RemoteMemUsed: v = 0; break;
+        // the kernel's page granule: the Switch 2 SDK's VammManager maps one granule of its node area up front (sdk+0x14aa10 in Mario Kart World 1.0.0: MapPhysicalMemory(node, 0)
+        // failed outside the alias region with 0) and nn::ro::ProtectRelro / RegisterModuleInfo check module addresses and sizes against it - 1
+        case I_PageGranule: v = DM_GAME_SWITCH2 ? 0x1000 : 0; break;
+        default: v = 0; if (g_flag.svc) LOG("GetInfo id %llu (handle %#llx, sub %#llx): not known to the host, 0", (unsigned long long)id, (unsigned long long)regs[2], (unsigned long long)regs[3]); break;
         }
         regs[0] = 0; regs[1] = v; return 0;
     }
