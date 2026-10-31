@@ -1044,11 +1044,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             // If both are constant buffer, give preference to the second operand,
             // because constant buffer are always encoded as the second operand,
-            // so the second operand will always be the one from the last instruction.
+            // so the second operand will always be the one from the last instruction,
+            // unless only the first one is the driver reserved constant buffer:
+            // nxnative, Switch 2 compute programs add a constant of their own c1 to
+            // a storage buffer address of the driver's c0 (c1 + c0, Mario Kart World).
 
             if (src1.Type != OperandType.ConstantBuffer ||
-                (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
-                (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))
+                (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb) ||
+                (src2.Type == OperandType.ConstantBuffer && src1.GetCbufSlot() != DriverReservedCb))
             {
                 return GetBaseAddressCbWithOffset(src2, src1, constOffset);
             }
