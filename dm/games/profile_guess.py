@@ -77,10 +77,18 @@ def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; 
     return d[:4] != b'META' or bool(d[0xc] & 1)
 
 
+def switch2(path):   # a Switch 2 program: main.npdm's ACID (at META +0x78) holds a 0x300-byte signature / key area before its "ACID" magic, where a Switch 1 one holds 0x200 (Mario Kart World); False without the file
+    if not Path(path).exists(): return False
+    d = Path(path).read_bytes()
+    if d[:4] != b'META' or len(d) < 0x80: return False
+    a = struct.unpack_from('<I', d, 0x78)[0]
+    return d[a + 0x200:a + 0x204] != b'ACID' and d[a + 0x300:a + 0x304] == b'ACID'
+
+
 def facts_of(exefs, romfs):
     """What the profile rules (and the survey report) need from a game's code modules and RomFS"""
     exefs = Path(exefs)
-    F = {'mods': {}, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
+    F = {'mods': {}, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None, 'switch2': False}
     for p in sorted(exefs.iterdir()):
         with open(p, 'rb') as f:
             if f.read(4) != b'NSO0': continue
@@ -101,6 +109,7 @@ def facts_of(exefs, romfs):
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
+    F['switch2'] = switch2(exefs / 'main.npdm')
     major = {v.split('_')[0] for v in F['sdkver']}
     F['sdk'] = min((int(v) for v in major if v.isdigit()), default=0)
 
@@ -163,6 +172,8 @@ def guess(F, hooks=None):
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 
+    if F.get('switch2'):
+        G['switch2'] = ('on', 'main.npdm\'s ACID has the Switch 2 layout (a 0x300-byte signature area): the host answers as Switch 2 (31.25 MHz counter, six cores, its SVCs and services)')
     if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
         G['shader_groups'] = ('ShaderArchive-Global-=global ShaderArchive-=game', 'the decoded shader code archives: the engine\'s global shaders and the game\'s material shaders')
     # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,

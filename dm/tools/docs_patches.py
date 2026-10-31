@@ -125,6 +125,8 @@ SWITCH_BINDING = [
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
+    ('switch2', '', {'what': 'a Switch 2 program', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': "a fact of the game's main.npdm (its ACID layout) that the survey writes into the profile; the host has no NPDM at run time"}),
 ]
 
 
