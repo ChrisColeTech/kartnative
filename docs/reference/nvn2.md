@@ -42,7 +42,7 @@ Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk
 |---|---|---|
 | +0x0 | window origin mode | `Get/SetWindowOriginMode` |
 | +0x4 | depth mode | `Get/SetDepthMode` |
-| +0x8 | device flags (bits 9 / 10 enable debug layers, bit 10 a "markers" buffer) | sdk+0x5b54e0, sdk+0x5b0c50 |
+| +0x8 | device flags (bits 9 and 10 / mask 0x600 start optional driver layers; bit 10 loads the separate "dlss" module, see [Dlss](#dlss)) | sdk+0x5b54e0, sdk+0x5b0c50 |
 | +0x10..+0x11c | GPU description copied from `NvRmGpuDeviceGetInfo` (sdk+0x5bf090): +0x54 / +0x58 GPU architecture words a shader control section must match, +0x80 / +0x84 timestamp ns numerator / denominator, +0xb0 / +0xb4 / +0xbc scratch-memory factors, +0xd8 memory-pool page size (the GPU's value, at least 64 KiB; item 0x3a) | sdk+0x5bf090, sdk+0x5b57c0 |
 | +0x968 / +0x970 / +0x980 | array and count of initialized memory pools, and their mutex: the driver turns a GPU address into a CPU pointer by searching it | sdk+0x5bf8b0 |
 | +0x9a0 / +0x9a8 / +0x9b0 | list and mutex of programs | sdk+0x5bf2c0 |
@@ -51,7 +51,7 @@ Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk
 
 ### Device information
 
-Every item not computed from the device comes from a static table (sdk+0x59bf50); items it does not list answer 0. Bold values differ from the NVN1 table the host reports today. Items 0x2e–0x31 are the accepted shader GPU-code versions: major 201, minor 0–11 — the major version in a control section's +0x4, the minor its +0x8 (see the program section) — not GLSLC's 1.x, so the host's GLSLC-based override of 0x2e / 0x30 must not apply to a Switch 2 game. Device-dependent items come from the GPU description (values depend on the NvRm answer; the host chooses them).
+Every item not computed from the device comes from a static table (sdk+0x59bf50); items it does not list answer 0. Bold values differ from the NVN1 table the host reports today. Items 0x2e–0x31 are the accepted shader GPU-code versions: major 201, minor 0–11 — the major version in a control section's +0x4, the minor its +0x8 ([Program and ProgramBuilder](#program-and-programbuilder)) — not GLSLC's 1.x, so the host's GLSLC-based override of 0x2e / 0x30 must not apply to a Switch 2 game. Device-dependent items come from the GPU description (values depend on the NvRm answer; the host chooses them).
 
 | Item | NVN1 name (`nvn.h`) | NVN1 value (host `g_devinfo`) | NVN2 value (MKW sdk) | MKW queries |
 |---|---|---|---|---|
@@ -283,6 +283,177 @@ Every item not computed from the device comes from a static table (sdk+0x59bf50)
 | `nvnDeviceSetIntermediateShaderCache` | 0x5b1100 | 0 | same | no-op |
 | `nvnDeviceSetWindowOriginMode` | 0x5b1110 | 0 | same | device+0 (MKW has no static call: it keeps the default, 0) |
 | `nvnDeviceWalkDebugDatabase` | 0x5b1120 | 0 | same | no-op |
+
+## Program and ProgramBuilder
+
+Sources: the decompiled driver, the control-section parser vtables at sdk+0xd6b980 / +0xd6bda8 / +0xd6c1d0 (decoded one getter at a time), and statistics over the 11,567 control sections in Mario Kart World's RomFS (split by `dm/gfx/tools/shader_split.py`). "S" below is the driver's 0x6f0-byte per-stage scratch record built by sdk+0x5bf6d4; "U" is its sub-record at S+0x640 filled by sdk+0x5c2078; "P" is the 0x90-byte per-stage record built by sdk+0x5c0598.
+
+### NVNprogram (0xA0 bytes in NVN2; NVN1 reserved 0xC0)
+
+Size evidence:
+- `nvnProgramInitialize` (sdk+0x5bf2c0) and `nvnProgramInitializeFromBuilder` (sdk+0x5c1730) zero exactly 20 qwords (0x00..0x9f) and touch nothing above.
+- MKW keeps programs in 0xA0-byte slots: the object built at main+0x16d6cf0 initialises three programs at object+0x18, +0xb8 and +0x158 (stride 0xa0), each with `ProgramBuilderSetDefaults`/`SetDevice`/`SetShaders(2)`/`InitializeFromBuilder`.
+- The host's `prog_t` (`nvn_obj.h`: magic, nstage, `NVNshaderData sd[6]`, serial = 0x70 bytes) still fits, but its FITS assert compares against nvn.h's 0xC0. For NVN2 the bound is **0xA0**: an 8-stage `sd[8]` variant (0x90) still fits; anything above 0xA0 overwrites the next program in MKW's arrays.
+
+| Offset | Type | Meaning | Evidence |
+|---|---|---|---|
+| +0x00 | u8 | value returned by `nvnProgramGetSubtileSize`; cleared by every SetShaders; no writer found | sdk+0x5c0910 (`ldrb w0,[x0]`), sdk+0x5bf8b0 clears it |
+| +0x08 | NVNdevice* | owning device | Initialize, InitializeFromBuilder (builder+8) |
+| +0x10 | u32 | program serial: device+0x1db0 atomically incremented on every SetShaders / ray-tracing link (bind-change detection [INFERENCE]) | sdk+0x5bf8b0, sdk+0x5c0af0 |
+| +0x14 | u32 | word count of the prebuilt bind command stream at +0x18 | sdk+0x5f6b60 |
+| +0x18 | u32* (heap) | prebuilt GPU method stream that BindProgram replays; for compute it starts with a 0x70-byte compute descriptor (its +0x20 = control+0xa8, +0x32 = control+0xba, +0x60 = control+0x10) | sdk+0x5f6b60, sdk+0x5c1820, sdk+0x5c09b0 |
+| +0x20 | heap, 8 × 0x38 | per-graphics-stage table (entry +0x20 register count, +0x24 word offset into +0x18, +0x28 control+0x10, +0x30 flags); 0 for compute programs | sdk+0x5f6b60 |
+| +0x28..+0x50 | ptr[6] | subroutine linkage map per stage 0..5 (`program + 0x28 + 8*stage`); +0x58..+0x68 are also cleared by SetShaders | sdk+0x5c0500, sdk+0x5bf8b0 |
+| +0x78 | heap 16 B | {debugger shader table ptr (set elsewhere), array of {ptr, u32 size} copies of each stage's control debug blob} | Initialize, sdk+0x5bf8b0, sdk+0x609910 |
+| +0x80 | u64 | bits 0–8: stage mask (bit = control+0x56 stage, bit 8 = ray tracing); 9–17: stages that use subroutines (control+0x94); 18–26: stages with a debug blob (control+0xcc ≠ 0); 27: shaders accepted; 28–31: sample-shading mode; 32–36: written by sdk+0x5f6b60 (meaning not established) | sdk+0x5bf8b0, sdk+0x5c08f0, sdk+0x5c0500 |
+| +0x88/+0x90 | list links | membership in device+0x9a0 program list (device mutex +0x9b0) | Initialize, Finalize |
+| +0x98 | heap 0xa8 | ray-tracing pipeline object (only when the builder had ray-tracing modules) | sdk+0x5c0af0 |
+
+### NVNprogramBuilder (0x80 bytes, new in NVN2)
+
+Size: SetDefaults (sdk+0x5c0920) writes +0x18..+0x63; getters read up to +0x60; MKW zeroes 0x80 bytes of stack before SetDefaults at both builder sites (main+0x1675cb4: sp+0x150..0x1cf; main+0x16d6d10: sp+0x20..0x9f). SetDefaults does not clear +0x08 (device).
+
+| Offset | Type | Meaning | Default | Evidence |
+|---|---|---|---|---|
+| +0x08 | NVNdevice* | device | (not cleared) | SetDevice sdk+0x5c0950 |
+| +0x18 | int | sample shading mode (copied into program+0x80 bits 28–31) | 0 | sdk+0x5c0970, sdk+0x5c0af0 |
+| +0x1c | int | debug-data-hash count | 0 | sdk+0x5c0990 |
+| +0x20 | ptr | array of 24-byte debug-data-hash records, record *i* belongs to shader *i* | 0 | sdk+0x5c0990, sdk+0x5c0af0 |
+| +0x28 | int | shader count | 0 | SetShaders sdk+0x5c09d0 |
+| +0x30 | const NVNshaderData* | shaders (16-byte {code GPU address, control CPU pointer}) | 0 | sdk+0x5c09d0 |
+| +0x38 | int | ray-tracing module count | 0 | sdk+0x5c0a00 |
+| +0x40 | const NVNshaderData* | ray-tracing modules (16-byte records; their controls have stage 8) | 0 | sdk+0x5c0a00, sdk+0x5c0af0 |
+| +0x48 | int | subroutine linkage count | 0 | sdk+0x5c0a10 |
+| +0x50 | const NVNsubroutineLinkageMapPtr* | linkage maps | 0 | sdk+0x5c0a10 |
+| +0x58 | int | max trace recursion depth | 2 | sdk+0x5d2970 |
+| +0x5c | int | max callable recursion depth | 2 | sdk+0x5d2990 |
+| +0x60 | u32 | program ray-tracing flags (low 2 bits used) | 0 | sdk+0x5d29b0, sdk+0x5c0af0 |
+
+The 24-byte debug-data-hash record matches GLSLC's `GLSLCdebugDataHash` shape: 16-byte build ID followed by the 64-bit debug hash (lo32, hi32) [INFERENCE from the size and from use: the driver only uses the third qword]. The same record type is what the third qword of NVN's 24-byte `NVNshaderDataExt` points to (sdk+0x5c03f0 splits the ext records into a 16-byte `NVNshaderData` array and an array of these pointers).
+
+### Function table: Program
+
+| Function | sdk impl | main uses | NVN1 ABI | Semantics |
+|---|---|---|---|---|
+| nvnProgramInitialize | 0x5bf2c0 | 2 (main+0xd121dc, +0x1675304) | same `(NVNprogram*, NVNdevice*)`, returns true | zero 0xa0, store device, link into device program list, allocate the 16-byte +0x78 record |
+| nvnProgramInitializeFromBuilder | 0x5c1730 | 3 (main+0x1675d2c, +0x16d6da8, +0x16d7ad0) | new `(NVNprogram*, const NVNprogramBuilder*)` → NVNboolean | Initialize, then sample shading, then either ray-tracing link (when builder+0x40 ≠ 0; graphics shaders are then ignored) or the SetShaders core with builder shaders + per-shader hash records, then subroutine linkage like SetSubroutineLinkage (sdk+0x5c0af0) |
+| nvnProgramFinalize | 0x5bf370 | 5 (main+0x6f16f0, +0x1675dc4, +0x16d7198, +0x16d7c90, +0x2281f8c) | same | under global mutex sdk+0xd96758: free +0x18/+0x20, unlink from device list, free debug-blob copies and +0x78, destroy the ray-tracing object through the device ray-tracing backend (device+0x1df0 vtable +0x140) |
+| nvnProgramSetShaders | 0x5bf8a0 | 3 (main+0x6f1548, +0xd12320, +0x1675484) | same `(NVNprogram*, int, const NVNshaderData*)` → NVNboolean | clears x3 and tail-calls the core sdk+0x5bf8b0 without hash records |
+| nvnProgramSetShadersExt | 0x5c03f0 | 1 (main+0x16756e0) | same name as NVN1 (no nvn.h prototype): `(NVNprogram*, int, const NVNshaderDataExt*)` → NVNboolean; record = {u64 code, const void *control, const debugDataHash *hash}, at most 9 records (stack arrays) | splits the records and calls the core with the hash pointers |
+| nvnProgramSetSubroutineLinkage | 0x5c0500 | 0 | same `(NVNprogram*, int, const NVNsubroutineLinkageMapPtr*)` | each map's int at +4 is a stage ≤ 5 that must be in the "uses subroutines" mask; stored at program+0x28+8·stage; true only when every subroutine stage got a map |
+| nvnProgramSetSampleShading | 0x5c08f0 | 0 | NVN1 name (no nvn.h prototype): `(NVNprogram*, NVNsampleShadingMode)` | stores mode in program+0x80 bits 28–31; takes effect at the next SetShaders: 1 forces per-sample fragment shading on, 2 forces it off, 0 keeps the control's flag (control+0x5a) |
+| nvnProgramGetSubtileSize | 0x5c0910 | 0 | NVN1 name, no nvn.h prototype; NVN2 implementation takes only the program and returns one byte | returns program+0x00 (0 after every SetShaders; no writer found) |
+| nvnProgramSetDebugLabel | 0x5b0b40 | 0 | same; **no-op** (`ret`) | — |
+| nvnProgramGetDeviceComputeMemorySize | 0x5c1820 | 0 | new `(const NVNprogram*)` → int | compute programs whose control+0xa8 == 1: `(control+0xba u16 + 0x22f) & 0x1ff00`; otherwise 0 (memory a device-side compute launch needs, see DeviceCommandBuffer [INFERENCE]) |
+| nvnProgramGetScratchBytesPerWarp | 0x5d11d0 | 0 | new `(const NVNprogram*)` → int | 0 without a ray-tracing object; otherwise `max(alignDown(max(stack,0x400)·32 + 0x65e0, 0x200), DeviceGetInteger(info 0x94, or 0xa0 when device+0x1e00 ≠ 0))`, stack = backend attribute 9 |
+| nvnProgramGetShaderGroupHandle | 0x5d10b0 | 0 | new `(const NVNprogram*, {int i0,i1,i2} by value in x1:x2, void *handle32)` | ray-tracing only: looks up up to three module indices (−1 = none) in RT object +0x38, asks the backend (device+0x1df0 vtable +0x128) for a 32-byte shader-group handle, caches it in a map under RT object mutex +0x88 |
+| nvnProgramGetDebugDataHashesNVX | 0x5c09b0 | 0 | new `(const NVNprogram*)` → u64 | compute programs only: the u64 at compute descriptor +0x60, which is control+0x10; 0 otherwise |
+
+### Function table: ProgramBuilder (all new in NVN2, 0 main uses unless noted)
+
+| Function | sdk impl | main uses | Semantics |
+|---|---|---|---|
+| SetDefaults | 0x5c0920 | 3 (main+0x1675cdc, +0x16d6d5c, +0x16d7a84) | see layout defaults |
+| SetDevice / GetDevice | 0x5c0950 / 0x5c0960 | 3 / 0 | +0x08 |
+| SetShaders / GetShaders / GetShaderCount | 0x5c09d0 / 0x5c09e0 / 0x5c09f0 | 3 / 0 / 0 | `(builder, int count, const NVNshaderData*)`; getters return +0x30 / +0x28 |
+| SetSampleShading / GetSampleShading | 0x5c0970 / 0x5c0980 | 0 | +0x18 |
+| SetDebugDataHashes / GetDebugDataHashes | 0x5c0990 / 0x5c09a0 | 0 | `(builder, int count, const hash24*)`; getter returns only the pointer (+0x20) |
+| SetRayTracingModules | 0x5c0a00 | 0 | `(builder, int count, const NVNshaderData*)` (no getter exists) |
+| SetSubroutineLinkage / GetSubroutineLinkage / GetSubroutineLinkageCount | 0x5c0a10 / 0x5c0a20 / 0x5c0a30 | 0 | +0x48/+0x50 |
+| SetMaxTraceRecursionDepth / Get… | 0x5d2970 / 0x5d2960 | 0 | +0x58 (default 2) |
+| SetMaxCallableRecursionDepth / Get… | 0x5d2990 / 0x5d2980 | 0 | +0x5c (default 2) |
+| SetProgramRayTracingFlags / Get… | 0x5d29b0 / 0x5d29a0 | 0 | +0x60; bits 0–1 go to bits 8–9 of the link descriptor word |
+
+`SetDefaults` writing `0x200000002` at +0x58 is two ints: max trace recursion depth 2, max callable recursion depth 2.
+
+### MKW's program call sequences
+
+- Builder path (3 sites): zero 0x80 bytes → `ProgramBuilderSetDefaults(b)` → `SetDevice(b, dev)` → `SetShaders(b, n, sd)` (n = 2 vertex+fragment at main+0x16d6d94; n = w22 at main+0x1675d10) → `InitializeFromBuilder(prog, b)`, result compared with 1 (main+0x1675d38). The source records store {control, code} and main swaps them into {code, control}.
+- Legacy path: main+0x1675200 first checks the container's binary version with `DeviceGetInteger` 0x2f/0x2e (min/max major, both 0xc9) and 0x31/0x30 (min minor 0, max minor 11; sdk+0x5b57c0 jump table), then `ProgramInitialize(prog, dev)` → collects per-stage records for stage slots 0..8 (main+0x1675610 loop) → `SetShadersExt` (records {code, control, record+0x30 as hash pointer}) when the container's flag bit 1 is set, else `SetShaders` (16-byte records). main+0xd122f0: two shaders, code = `MemoryPoolGetBufferAddress(pool) + offset`, control = CPU pointer into the file.
+- MKW never calls GetShaderGroupHandle, the ray-tracing builder setters, SetSubroutineLinkage or SetSampleShading.
+
+### SetShaders core (sdk+0x5bf8b0): what the driver checks and does
+
+1. Program serial +0x10 ← ++device+0x1db0; frees the previous debug-blob copies, the bind stream and per-stage table; clears +0x00, +0x28..+0x68, +0x80 bits 0–26.
+2. For each shader: a parser object is created from its control (sdk+0x5bf500): control+0x04 must be 0xc9, control+0x08 selects the class (0–1 → vtable sdk+0xd6b980, 2 → +0xd6bda8, 3–11 → +0xd6c1d0; anything else fails). Stage = control+0x56 (u8).
+3. Fails (returns false) when: a parser can't be made; stage == 8; a stage repeats; control is null or not 8-byte aligned; any code address is 0; control+0x04 ≠ 0xc9 or version > 11; version < 5 with control+0xd1 ≠ 0; a compute shader with control+0xa7 == 0 on a device whose flag bit 18 (device byte +0x0a bit 2) is set; or any stage whose control u16 +0x0c / +0x0e differs from device u32 +0x54 / +0x58.
+4. device+0x54 / +0x58 are the GPU architecture and implementation ids: they are words +0x44 / +0x48 of the 0x10c-byte GPU-characteristics block at device+0x10, which sdk+0x5bf090 fills from `NvRmGpuDeviceGetInfo()` (info +0xd0 and +0xd4) and sdk+0x5b4450 copies in (`memcpy(device+0x10, block, 0x10c)`). Every MKW control carries 0x0170 / 0x000e there, so a working console reports arch 0x170 (Ampere family), impl 0xe [values from the data; the hardware query itself not observed].
+5. Code GPU address → CPU pointer through the device pool table (device+0x968/+0x970, mutex +0x980). Debug blobs (control+0xc8 offset, +0xcc size) are copied to the heap.
+6. Sample-shading override for the fragment stage, then the per-stage record P (sdk+0x5c0598), the debugger shader table entry (sdk+0x609910), a compute scratch override (sdk+0x6098a0, only when debug globals sdk+0xd97470/+0xd97474 are set), and the bind command stream (sdk+0x5f6b60) built from the last pre-raster stage (geometry, else tess eval, else tess control, else vertex) plus all stage records.
+7. **In-place code patch (real driver only):** when the CPU mapping exists, the driver walks backwards from `code + (control+0x38 & ~0xf)`; if it finds ≥ 8 NOPs (opcode low 9 bits 0x118) preceded by a BRA (0x147), it rewrites the last 8 instruction slots with `MOV RZ, imm32` no-ops carrying 0x12345678, control+0x38, hash.lo32, hash.hi32, stage, 0, 0, 0 (constants at sdk+0xac4e10 / +0xac6ca0 / +0xac4520). The ray-tracing path does the same per module. Semantically a no-op, but GPU memory after a real driver run differs from the file bytes in those 0x80 bytes.
+
+### Control section (fixed header 0xd8 bytes for versions 3–11, 0xd0 for 0–2)
+
+The class's slot 0 returns the header size (0xd0 classes 0/1, 0xd8 class 2). Every other slot is a 3-instruction getter reading one field. Only the slots below are called by the driver (sdk+0x5bf6d4, +0x5c1f10, +0x5c2078, +0x5bf8b0, +0x5c0af0). "MKW" = values seen in the 11,567 MKW controls (versions 7 and 11 only).
+
+| Offset | Type | Getter slot | Driver use | MKW values / meaning |
+|---|---|---|---|---|
+| +0x00 | u32 | 0x08 | copied to S+0, not checked | 0x98761234 magic |
+| +0x04 | u32 | 0x10 | must be 0xc9 | 0xc9 |
+| +0x08 | u32 | 0x18 | parser class, ≤ 11 | 7, 11 |
+| +0x0c | u16 | 0x20 | must equal device+0x54 | 0x170 |
+| +0x0e | u16 | 0x28 | must equal device+0x58 | 0xe |
+| +0x10 | u64 | 0x30 | U+0x68 → P+0x38 → per-stage table +0x28; compute: returned by GetDebugDataHashesNVX | 0 |
+| +0x18 | u64 | 0x38 | U+0x78 → P+0x80 | 0 (BAHS) or flag-like values such as 0x00288040_00220014 (meaning not established) |
+| +0x20 | 16 B | 0x40/0x48 | **not read** | debug hash (0 in BAHS copies) |
+| +0x30 | u32 | 0x50 | not read | total control length incl. trailing blobs (0xd8, 0x750, …) |
+| +0x38 | u32 | 0x60 | P+0x18; end of the code patch window | end of instructions within the code area (graphics: header included) |
+| +0x3c | u32 | 0x68 | P+0x1c | c1 constant-segment size |
+| +0x40 | u32 | 0x70 | P+0x14 | c1 constant-segment start |
+| +0x44 | u32 | 0x78 | P+0x30 | code-area size |
+| +0x48 | u32 | 0x80 | P+0x10 → program address = code + this | 0 (entry offset) |
+| +0x4c | u32 | 0x88 | P+0x28 → register count in the bind stream (clamped to device+0x1d20) | register count |
+| +0x50 | u32 | 0x90 | P+0x2c | local (scratch) memory size; 0 / 0x200 / 0x2600 / 0x4000 |
+| +0x54 | u8 | 0x98 | transform-feedback buffer count (≤ 4) | 0 |
+| +0x55 | u8 | 0xa0 | copied next to it (S+0x621; count at S+0x620) | 0 |
+| +0x56 | u8 | 0xa8 | stage | 0 vertex 1 fragment 2 geometry 3 tess control 4 tess eval 5 compute 6 task 7 mesh 8 ray tracing |
+| +0x58..+0x77 | union | 0xb0..0x2e8, 0x248 | per stage, below | |
+| +0x7c..+0x88 | u32[4] | 0x2f0(i) | U+0x58..+0x64 | 0 |
+| +0x8c | u32 | 0x2f8 | U+0x70 | 0 |
+| +0x90, +0x91 | u8 | 0x300, 0x308 | P+0x40, P+0x41 | 0 |
+| +0x92, +0x93 | bool | 0x310, 0x318 | S+0x6d0, S+0x6d1 | 0 |
+| +0x94 | bool | 0x320 | stage uses subroutines (program+0x80 bit 9+stage) | 0 |
+| +0x98, +0x9c | u32 | 0x328, 0x330 | not read | +0x98 = control length or 0 |
+| +0xa0, +0xa1 | bool | 0x338, 0x340 (= a0 && a1) | ray-tracing path | 0 |
+| +0xa2..+0xa6 | bool | 0x348..0x368 | U+0x81..0x85 → P+0x88 bits 0–2; RT object +0x50 bits 0–4 | +0xa3 = 1 in 319 controls; +0xa6 = 1 in 91 compute controls |
+| +0xa7 | bool | 0x370 | selects the transform-feedback encoding; compute must have it when device flag bit 18 is set | 1 in all 11,567 |
+| +0xa8 | u8 | 0x378 (compute) | U+0x40; ==1 enables GetDeviceComputeMemorySize | 1 in all 728 compute controls |
+| +0xa9..+0xb0 | u8[8] | 0x380(i) (compute) | U+0x41..0x48 | +0xa9 = 8 in 30 compute controls, else 0 |
+| +0xb1..+0xb8 | u8 | 0x388..0x3c0 (compute) | U+0x49..0x50 | |
+| +0xba | u16 | 0x3c8 (compute) | U+0x52 → GetDeviceComputeMemorySize | 0x38..0x80 |
+| +0xbc, +0xc0 | u32 | 0x3d0, 0x3d8 | not read | offset/size of a trailing blob (0xd8 / 0x260..0xdc0) |
+| +0xc4 | u32 | 0x3e0 | offset of the transform-feedback blob (read only when +0x54 ≠ 0) | 0xd8 |
+| +0xc8, +0xcc | u32 | 0x3e8, 0x3f0 | debug blob offset / size (copied when size ≠ 0) | offset 0xd8 / size 0 |
+| +0xd0 | u8 | 0x3f8 (v3+) | U+0x86; compute U+0x51 | 0 |
+| +0xd1 | u8 | 0x400 (v3+, must be 0 below v5) | U+0x87 | 0 |
+
+Stage union (+0x58..+0x77):
+
+| Stage | Fields the driver reads | MKW observation |
+|---|---|---|
+| 0 vertex | u32 +0x58 +0x5c +0x60 +0x64 +0x68 +0x6c. When +0x5c ≠ 0 and +0x68 ≠ 0 the driver builds a second program record: first part entry +0x58 / end +0x5c, second part entry +0x64 / end +0x68 / registers +0x6c (sdk+0x5c0598) | all 0 |
+| 1 fragment | bools +0x58..+0x60, u8 +0x61, u8 +0x62, 16 bytes +0x64; **+0x5a = per-sample shading** (overridden by SetSampleShading) | +0x62 ∈ {1,2,3,6} (colour-target mask [INFERENCE]); +0x64.. floats 1.0 / 0.75 in 30 shaders |
+| 2 geometry | u8 +0x58, bools +0x59 +0x5a, 32 bytes +0x5c | none in MKW |
+| 3/4 tessellation | u32 +0x58..+0x74 | none in MKW |
+| 5 compute | u32 +0x58 +0x5c +0x60 workgroup size x y z, +0x64 shared-memory bytes, +0x68 +0x6c +0x70 (inputs of the scratch override: scratch = +0x70 + device[+0xc4]·(+0x68 + +0x6c)), +0x74 | x ∈ {4..128}, shared 0..0xc000, +0x74 ∈ {0,1} |
+| 6 task | u16 +0x58 +0x5a +0x5c | +0x58 = 32 (workgroup size), +0x5a = 0x100 or 0x580 (payload bytes [INFERENCE]) |
+| 7 mesh | u16 +0x58 +0x5a +0x5c, u8 +0x5e +0x5f, u16 +0x60 +0x62 +0x68, u32 +0x64 | +0x58 workgroup size (8/32), +0x5a = matching task payload size, +0x5f = 3, +0x60/+0x62 = 128/64, 32/16, 256/192 (max vertices / primitives [INFERENCE]), +0x64 shared bytes |
+| 8 ray tracing | u32 +0x58 (link flags), +0x5c size and +0x60 offset of a blob inside the control, +0x64 code end, u8 +0x6c..+0x6f, u8 +0x70..+0x76 | only via ProgramBuilderSetRayTracingModules |
+
+Transform-feedback blob (control + [+0xc4], only when +0x54 ≠ 0): u32 format = 1, then per buffer u16 stride, u8 stream, u8 varying count, then per buffer three byte arrays of that count; sdk+0x5f6b60 turns it into the 3D-engine transform-feedback layout methods (byte method 0x700 + 0x10·buffer) and per-buffer varying locations. MKW never sets it.
+
+### Which bytes the host can key a translated shader on
+
+The key the shader split uses, **sha256(control[0:0xd8] + code[0 : control+0x44])[:16], is confirmed** for MKW:
+- 0xd8 is exactly the fixed header the driver parses for versions 3–11 (class slot 0); MKW has only versions 7 and 11.
+- The code bytes start at `NVNshaderData.data` (the code-area start: the 0x80-byte program header for graphics stages, the first instruction for compute); every code offset the driver uses (+0x38, +0x40, +0x44, +0x48) is relative to that address.
+- Bytes in the key the driver ignores: +0x20..+0x2f (debug hash) and +0x30/+0x98/+0xbc..+0xcc (blob bookkeeping). The same program copied in a BNSH and a BAHS container therefore gets two keys; harmless because the offline split emits every copy.
+- Bytes outside the key that change behaviour: only the transform-feedback blob (control+0x54 ≠ 0), absent in MKW. If a title uses it, add `control[+0xc4 : …]` to the key.
+- Hash at SetShaders/InitializeFromBuilder time, on the bytes the game passes. The real driver patches the last 0x80 bytes before control+0x38 (see core step 7); dumps of GPU memory taken after a real driver ran will not match file-based keys. nxnative replaces the driver, so nothing patches.
+
+### Ray-tracing link (InitializeFromBuilder with modules)
+
+RT object (0xa8 bytes at program+0x98): +0x00 backend pipeline handle; +0x30 u32 module count; +0x38 per-module handles (count+1)·8; +0x40 u32 count; +0x48 module info array (0x28 each: blob size = control+0x5c, blob pointer = control + [control+0x60], code end = control+0x64, CPU and GPU code addresses); +0x58 concatenated 8-aligned blobs; +0x60 per-module backend data (count × backend attribute 0x19); +0x68 per-module debug hash (record +0x10); +0x70/+0x71/+0x72 control bytes +0x6c/+0x6d/+0x6e of module 0; +0x73 max trace recursion depth; +0x74 link flags (control+0x58 with bits 8–9 = builder RT flags, bit 0 set); +0x78 max callable recursion depth; +0x80 group-handle cache, +0x88 mutex. The link goes through the device's ray-tracing backend (device+0x1df0 vtable, object device+0x1df8; +0x138 link, +0x150/+0x158/+0x148 queries, symbol "descriptorBaseArray"). Program+0x80 bit 8 marks it. [Metal: MTLLinkedFunctions / intersection function tables would be the counterpart [INFERENCE]; MKW does not use it.]
 
 ## Command buffers
 
@@ -1160,3 +1331,187 @@ MKW (main+0x8f7044..0x8f70a4): EventBuilderSetDefaults → SetStorage(pool, offs
 - Exact meaning of the texture flag that triggers the present-time "make displayable" pass (texture+0x28 bit 3, backend+0xc = 1).
 - The final presented size MKW uses docked: static default 2560×1440 (main+0xcf3574) versus report E3's 3840×2160 images cropped to 2560×1440. The resolution table at main+0x2a16174 suggests a runtime choice; trace main+0xe33e50 / main+0x2323270 to settle it.
 - nvnSyncGetNvRmSyncNVX: the exact meaning of its second argument (passed in the attribute block of `NvRmSyncCreateFromSyncpointsWithAttr`, closed for unfenced syncs).
+
+## Dlss
+
+All 54 `nvnDlss*` functions and `nvnCommandBufferEvaluateDlss` have **0 static uses in main**, and their main GOT entries (main+0x3305268..+0x3305418) are referenced only by the relocation table. MKW's `DeviceBuilderSetFlags` value is 0 or one of {0x1, 0x4, 0x10, 0x20, 0x40} (main+0xcf3aa4, table main+0x292b750 via main+0x226d8f8), never bit 10 (0x400): device init (sdk+0x5b54e0) only loads the DLSS backend when device flags bit 10 is set (sdk+0x5b869c loads module "dlss" (sdk+0xab1dff) and calls its "Handshake" export; the backend object lives at sdk+0xedb1d8). **MKW does not use DLSS.** Without the backend, Initialize/Evaluate would dereference a null backend.
+
+Backend vtable: +0x00 init(device), +0x08 shutdown, +0x10 flush/finish, +0x18 optimal settings, +0x20 create feature, +0x28 destroy feature, +0x30 evaluate, +0x38 post-init. Calls are serialised by mutex sdk+0xedb180 with the current network/parameters/command buffer published in globals sdk+0xedb1a0..+0xedb1b8.
+
+### NVNdlssNetworkBuilder (0xC0 bytes)
+
+SetDefaults (sdk+0x5b9aa0) writes +0x08..+0xbf (device at +0x00 is not cleared).
+
+| Offset | Type | Meaning | Default |
+|---|---|---|---|
+| +0x00 | NVNdevice* | device | — |
+| +0x08 | const NVNtexturePool* | pool that receives DLSS's descriptors (SetTextureIDs arg 2) | 0 |
+| +0x10 / +0x18 | void* / size_t | storage memory / size | 0 |
+| +0x20 | u32 | flags (bit 0 inverted into the feature flags; bits 1,2,3,6 passed through; bit 28 → output subrect base honoured; bit 29 changes the storage formula) | 0 |
+| +0x24 | int | method (1 vs other changes storage size; passed to optimal settings) [quality/perf mode, INFERENCE] | 0 |
+| +0x28 | int | preset (8 needs more storage) | 0 |
+| +0x2c / +0x30 | int | output width / height | 0 |
+| +0x34 | int | max evaluation entries (each reserves 0x10000 bytes of storage) | 1 |
+| +0x38..+0xb7 | int[32] | texture IDs (only IDs 0–5 are used by Evaluate: input colour, depth, motion vectors, bias mask, output, exposure) | 0 |
+| +0xb8 | u64 | cleared, unused | 0 |
+
+### NVNdlssNetwork (0x218 bytes)
+
+`nvnDlssNetworkInitialize` (sdk+0x5b8bd0) clears exactly 0x218 bytes. +0x08 device, +0x10 texture pool, +0x18..+0x97 texture IDs, +0x98 = 0x3f, +0xa0 backend feature handle, +0xa8 device, +0xb0/+0xb8 storage cursor/remaining, +0xc8 an embedded NVNmemoryPool (0x100 bytes, flags 0x21) over the first page-aligned `maxEntries·0x10000` bytes of the storage, +0x1c8 max entries, +0x1d4/+0x1dc method, +0x1d8 feature flags, +0x1e0 preset, +0x1e4/+0x1e8 and +0x1f8..+0x204 six optimal-settings outputs, +0x1ec/+0x1f0 and +0x208/+0x20c output size, +0x1f4 flags bit 28, +0x210 builder flags. Storage is zero-filled at Initialize.
+
+### NVNdlssParameters (0xC8 bytes)
+
+SetDefaults (sdk+0x5b9c20) writes 0..0xc7: all 0 except +0x58/+0x5c = 1.0f, +0x60 = 1.0f, +0xb0..+0xbf = −1.
+
+| Offset | Field (setter) |
+|---|---|
+| +0x00/+0x08 | input colour (texture, view) |
+| +0x10/+0x18 | output colour (texture, view) |
+| +0x20/+0x28 | motion vectors (texture, view) |
+| +0x30/+0x38 | depth (texture, view) |
+| +0x40/+0x48 | bias-current-colour mask (texture, view) |
+| +0x50/+0x54 | jitter offset x, y (float) |
+| +0x58/+0x5c | motion-vector scale x, y (float, default 1) |
+| +0x60 | pre-exposure (float, default 1) |
+| +0x68/+0x70 | exposure (texture, view) |
+| +0x78 | history reset (bool) |
+| +0x7c | evaluation index |
+| +0x80/+0x84 | input subrect size (0,0 → input texture's width +0x20 / height u16 +0x24) |
+| +0x88, +0x90, +0x98, +0xa0, +0xa8 | subrect bases (x, y) of input colour, depth, motion vectors, bias mask, output |
+| +0xb0, +0xb4, +0xb8, +0xbc | overlay debug layer, full screen, show NaNs, jitter debug (default −1) |
+| +0xc0 | u64, cleared, no setter |
+
+The (texture, view) pairs go to sdk+0x6fd0b0, which builds a texture descriptor from both [INFERENCE: `const NVNtexture*`, `const NVNtextureView*`].
+
+### Evaluation (`nvnCommandBufferEvaluateDlss`, sdk+0x5b93d0)
+
+`(NVNcommandBuffer*, const NVNdlssNetwork*, const NVNdlssParameters*)`. Recorded into the command buffer, not a device call:
+1. a 0x120-byte capture record (opcode 0x59, closed by 0x5a);
+2. for each non-null texture: a descriptor is built and written by the command buffer (sdk+0x6ecbf0, 0x20 bytes) into texture-pool slot `ID[k]` at `pool memory GPU address + pool offset + 32·ID`;
+3. marker method 0xa0032e8a with render size and output size (skipped in command-buffer mode 2);
+4. backend evaluate (vtable +0x30), which records DLSS's compute passes into the same command buffer, then +0x10;
+5. closing marker 0x80002e8a.
+Exposure texture is used only when feature flags bits 0 and 6 are clear.
+
+Metal mapping [INFERENCE]: a network ≈ `MTLFXTemporalScaler` created with input size (optimal render size), output size, colour/depth/motion formats; Parameters map to the scaler's colour/depth/motion/output/exposure textures, `jitterOffsetX/Y`, `motionVectorScaleX/Y`, `preExposure`, `reset`, `inputContentWidth/Height` (subrect size); the subrect bases need a blit or texture views. Encode it at the position of the EvaluateDlss call.
+
+### Function table: Dlss (all new, 0 main uses)
+
+| Function | sdk impl | Semantics |
+|---|---|---|
+| nvnCommandBufferEvaluateDlss | 0x5b93d0 | see above |
+| nvnDlssNetworkInitialize | 0x5b8bd0 | `(network, const builder*)` → bool (backend handle ≠ 0) |
+| nvnDlssNetworkFinalize | 0x5b8e40 | destroy feature, finalize embedded pool |
+| NetworkBuilderSetDefaults | 0x5b9aa0 | layout above |
+| NetworkBuilderSetDevice / GetDevice | 0x5b9ae0 / 0x5b9af0 | +0x00 |
+| NetworkBuilderSetFlags / GetFlags | 0x5b9b00 / 0x5b9b10 | +0x20 |
+| NetworkBuilderSetOutputResolution / Get… | 0x5b9b20 / 0x5b9b30 | `(b, int w, int h)` / `(b, int*, int*)` |
+| NetworkBuilderSetMethod / GetMethod | 0x5b9b50 / 0x5b9b60 | +0x24 |
+| NetworkBuilderSetPreset / GetPreset | 0x5b9b70 / 0x5b9b80 | +0x28 |
+| NetworkBuilderSetStorage | 0x5b9b90 | `(b, void*, size_t)` |
+| NetworkBuilderGetMemory / GetMemorySize | 0x5b9ba0 / 0x5b9bb0 | +0x10 / +0x18 |
+| NetworkBuilderSetTextureIDs | 0x5b9bc0 | `(b, const NVNtexturePool*, const int ids[32])` |
+| NetworkBuilderSetMaxEvaluationEntries / Get… | 0x5b9c00 / 0x5b9c10 | +0x34 |
+| NetworkBuilderGetOptimalSettings | 0x5b8de0 | `(b, int* ×6)` → backend +0x18 with output size and method [outputs: optimal, then two more render-size pairs, INFERENCE] |
+| NetworkBuilderGetStorageSize | 0x5b8ee0 | size_t from output size, preset, method, flags bit 29, max entries; needs the backend loaded (reads backend+8 bit 1) |
+| ParametersSetDefaults | 0x5b9c20 | layout above |
+| ParametersSetInputColor / SetOutputColor / SetMotionVectors / SetDepth / SetBiasCurrentColorMask / SetExposureTexture | 0x5b9c60 / 0x5b9c70 / 0x5b9cc0 / 0x5b9cd0 / 0x5b9ce0 / 0x5b9d40 | `(p, texture, view)` |
+| ParametersSetOverlayDebugLayer / FullScreen / ShowNans / JitterDebug | 0x5b9c80 / 0x5b9c90 / 0x5b9ca0 / 0x5b9cb0 | int at +0xb0/+0xb4/+0xb8/+0xbc |
+| ParametersSetJitterOffset / Get | 0x5b9cf0 / 0x5b9d00 | `(p, float, float)` (floats in s0/s1) / `(p, float*, float*)` |
+| ParametersSetPreExposure / Get | 0x5b9d20 / 0x5b9d30 | `(p, float)` |
+| ParametersSetHistoryReset / Get | 0x5b9d50 / 0x5b9d60 | bool +0x78 |
+| ParametersSetMotionVectorScale / Get | 0x5b9d70 / 0x5b9d80 | `(p, float, float)` |
+| ParametersSetEvaluationIndex / Get | 0x5b9da0 / 0x5b9db0 | int +0x7c |
+| ParametersSetInputSubrectangleSize / Get | 0x5b9dc0 / 0x5b9dd0 | `(p, int, int)` |
+| Parameters{Set,Get}InputColorSubrectangleBase | 0x5b9df0 / 0x5b9e00 | +0x88 |
+| Parameters{Set,Get}DepthSubrectangleBase | 0x5b9e20 / 0x5b9e30 | +0x90 |
+| Parameters{Set,Get}MotionVectorSubrectangleBase | 0x5b9e50 / 0x5b9e60 | +0x98 |
+| Parameters{Set,Get}BiasCurrentColorSubrectangleBase | 0x5b9e80 / 0x5b9e90 | +0xa0 |
+| Parameters{Set,Get}OutputSubrectangleBase | 0x5b9eb0 / 0x5b9ec0 | +0xa8 |
+
+## DeviceCommandBuffer and DeviceMessageBuffer
+
+No main uses for any of these (main GOT entries +0x3305450..+0x33054e8 referenced only by relocations).
+
+### NVNdeviceCommandBuffer (≥ 0x30 bytes; driver touches 0x00..0x2f)
+
+Memory the GPU itself writes commands into ("device-generated commands"), later executed as pushbuffer segments.
+
+| Offset | Type | Meaning |
+|---|---|---|
+| +0x00 | NVNdevice* | SetDevice (sdk+0x5b6ae0) |
+| +0x08 | const NVNmemoryPool* | SetStorage arg 2 |
+| +0x10 | i64 | offset in the pool |
+| +0x18 | u64 | size |
+| +0x20 | u64 | command memory size (SetCommandMemorySize) |
+| +0x28 | u64 | compute memory size (SetComputeMemorySize) |
+
+- `GetHandle` (sdk+0x5b6b20): pool GPU address (pool+0x18) + offset, 0 without a pool.
+- `CommandBufferBeginDeviceCommands(cmd, dcb)` (sdk+0x5b6b40): emits a 9-word method (0xa008?e9a family) with the handle, a 0x100-byte header, `align(cmdSize+0x1ff, 0x100)`, `cmdSize+0x100`, the larger of command and compute area ends, the segment count `ceil(cmdSize/0x7ffffc)` and 0x7ffffc.
+- `CommandBufferEndDeviceCommands` (sdk+0x5b6c50): closes the generation phase (a wait/flush word chosen by command-buffer mode).
+- `CommandBufferSubmitDeviceCommands` (sdk+0x5b6fc0): appends control-memory entries that execute `handle+0x100` as pushbuffer segments of at most 0x7ffffc bytes.
+- `ProgramGetDeviceComputeMemorySize` gives the per-program compute memory this mechanism needs.
+Host [INFERENCE]: implementing it means interpreting GPU-written NVN2 method streams; MKW never does it.
+
+### NVNdeviceMessageBuffer (≥ 0x28 bytes): shader printf
+
+| Offset | Type | Meaning |
+|---|---|---|
+| +0x00 | NVNdevice* | SetDevice (sdk+0x5b7370) |
+| +0x08 | const NVNmemoryPool* | SetStorage arg 2 (sdk+0x5b7380) |
+| +0x10 | int | offset in the pool |
+| +0x14 | int | size |
+| +0x18 | ptr | read base (BeginMessages) |
+| +0x20 | u32 | read cursor (starts at 0xc) |
+| +0x24 | u32 | read end (header word 2 if non-zero, else word 0) |
+
+Buffer memory (pool CPU address + offset): header {u32 write offset, u32 capacity, u32 wrap end}; `Reset` (sdk+0x5b7390) writes {0xc, size, 0}. Records from +0xc: u32 record size, u16 source stage code, i16 at +6, four u32 at +8..+0x14, a NUL-terminated printf format at +0x18, then 4-byte-aligned arguments up to the record end. `GetNextMessage(dmb, int info[6], char *text, size_t textSize)` → bool (sdk+0x5b7430): info[0] = the i16, info[1] = NVN stage (source codes 0→0, 4→1, 3→2, 1→3, 2→4, 5→5, 0x1493→6, 0x1494→7, 0x14c1..0x14c6→8, else −1), info[2..5] = the four u32; formats `%d %i %u %x %X %o %f %e %g %a %lX…`, `%llu`, and vectors `%v2f`..`%v4f` (joined by ", "). `EndMessages` clears the cursor. Command-buffer side (CommandBuffer family): `BindDeviceMessageBuffer(cmd, stage, int, dmb)` binds the buffer's GPU address per stage (compute and stage 8 through deferred records), `ResetDeviceMessageBuffer[Deferred]`.
+
+Host [INFERENCE]: a Metal implementation can keep the buffer empty (Reset header, GetNextMessage false); MKW never binds one.
+
+| Function | sdk impl | Semantics |
+|---|---|---|
+| nvnDeviceCommandBufferSetDefaults | 0x5b6ac0 | clear +0x08..+0x2f |
+| nvnDeviceCommandBufferSetDevice | 0x5b6ae0 | +0x00 |
+| nvnDeviceCommandBufferSetStorage | 0x5b6af0 | `(dcb, pool, i64 offset, u64 size)` |
+| nvnDeviceCommandBufferSetCommandMemorySize | 0x5b6b00 | +0x20 |
+| nvnDeviceCommandBufferSetComputeMemorySize | 0x5b6b10 | +0x28 |
+| nvnDeviceCommandBufferGetHandle | 0x5b6b20 | GPU address |
+| nvnDeviceMessageBufferSetDefaults | 0x5b7360 | clear +0x08..+0x27 |
+| nvnDeviceMessageBufferSetDevice | 0x5b7370 | +0x00 |
+| nvnDeviceMessageBufferSetStorage | 0x5b7380 | `(dmb, pool, int offset, int size)` |
+| nvnDeviceMessageBufferReset | 0x5b7390 | CPU-side header reset |
+| nvnDeviceMessageBufferBeginMessages | 0x5b73d0 | start reading |
+| nvnDeviceMessageBufferGetNextMessage | 0x5b7430 | format next record |
+| nvnDeviceMessageBufferEndMessages | 0x5b7420 | stop reading |
+
+## Interception, interop and other NVX names
+
+None has a main use.
+
+| Function | sdk impl | NVN1 | Semantics |
+|---|---|---|---|
+| nvnInterceptionInitializeNVX | 0x5b61c0 | new | `(void *table)`: clears a 0x15d0-byte table (698 pointers, sorted-name order), bumps refcount sdk+0xedb170; first caller sets up the pristine table and the default dispatch-reset callback (sdk+0x5b6958); returns true |
+| nvnInterceptionSetProcAddressNVX | 0x5b6240 | new | `(table, const char *name, fn, PFN *original)`: name must start "nvn"; binary search of the 698 names; stores fn in the caller's table, returns the pristine entry in *original; false for an unknown name |
+| nvnInterceptionSetDispatchResetCallbackNVX | 0x5b6350 | new | `(?, cb, *oldCb)`: replaces the global callback (first argument unused) |
+| nvnInterceptionTryAcquireNVX | 0x5b6390 | new | `(table)`: atomically becomes owner (sdk+0xedb168) unless someone else is; rebuilds the active dispatch table (sdk+0xed9b48) = pristine table (sdk+0xedc940) overlaid with the caller's non-null entries |
+| nvnInterceptionOwnedNVX | 0x5b6540 | new | owner == table |
+| nvnInterceptionReleaseNVX | 0x5b6560 | new | owner → 0, active table restored from pristine |
+| nvnInterceptionFinalizeNVX | 0x5b65e0 | new | refcount−− |
+| nvnSetExternalDebuggerEnabledNVX | 0x5b61b0 | NVN1 name | tail-jumps through the pointer at sdk+0xd96740, whose default is a `ret` (sdk+0x5b6830): **no-op** unless a tool patches it |
+| nvnSetGLInteropNVX | 0x5b5f60 | new | stores one pointer in sdk+0xedb160 (read back by sdk+0x5b6840) |
+| nvnCUDAInteropFunction | 0x5cc4f0 | new | one entry point for CUDA interop: argument struct {u16 version (must be 1), u16, u32 result @+4, u32 opcode @+8 (0–9), args* @+0x10}; writes {1,1} into the first two u16; result 0 ok, 1 version mismatch, 2 failure, 3 unsupported (device+0x168 bit 3 clear for ops 7/8), 4 opcode > 9. Ops: 0 create the CUDA memory pool (device+0x1bf8, flags 0x412), 1 destroy it, 2/4 export buffer or pool addresses, 3 export a texture's layout, 5/6 sync objects, 7/8 queries, 9 a flag bit. Host: return 4 or 3 |
+| H3ikr9ix | 0x5b5f70 | new (obfuscated) | `(fn)`: overwrites the default dispatch-table entry for `TexturePoolRegisterTexture` (sdk+0xd95168 table) with fn; affects later GetProcAddress results only |
+| yK1NUEJH | 0x5b6020 | new (obfuscated) | `(const NVNtexturePool*, ptrdiff_t byteOffset, const uint32_t *words, size_t bytes)`: copies raw descriptor words into the pool's memory at pool CPU + pool offset + byteOffset; flushes 0x20 bytes when the pool is CPU-cached (pool flag bit 2). Companion of H3ikr9ix (raw descriptor registration) |
+| nvnCommandBufferCopyTextureToTextureWithCopyEngineNVX | 0x5b0770 | new | `(cmd, const NVNtexture *src, const NVNcopyRegion *srcRegion, const NVNtexture *dst, const NVNcopyRegion *dstRegion)`: 2D copy with the copy (DMA) engine using src x,y,width,height and dst x,y (sdk+0x5ae530); no views, no flags. Metal: blit copy |
+| nvnDeviceBuilderSetReservedAddressRangesNVX / Get… | 0x5b4230 / 0x5b4240 | new | `(builder, int count, const range*)` at builder+0x08/+0x10; Get returns the count and the pointer. Range = 24 bytes {u64 address, u64 size, u32 flags}; device init reserves each range in the GPU address space (sdk+0x5b54e0) |
+| nvnProgramGetDebugDataHashesNVX | 0x5c09b0 | new | see Program table |
+
+## Open questions: programs, DLSS, device commands and NVX names
+
+- Who writes program+0x00 (`GetSubtileSize`); no writer in the decompiled set, so it reads 0 after SetShaders.
+- Meaning of control +0x18 (u64, non-zero in BNSH copies), fragment bools +0x58..+0x60 other than +0x5a, fragment floats +0x64..+0x73, +0x55, +0x90..+0x93, +0xa0..+0xa6, and the compute bytes +0xa9..+0xb8. They feed the bind stream built by sdk+0x5f6b60, which was not decoded method by method.
+- The exact NVN1 prototype of `nvnProgramGetSubtileSize` and `nvnProgramSetShadersExt` (not in nvn.h); NVN2's behaviour is above.
+- DLSS method/preset/flag enum values and the order of the six optimal-settings outputs.
+- `nvnInterceptionSetDispatchResetCallbackNVX` first argument (unused by the driver).
+- The u16 at message record +6 and the four u32 at +8..+0x14 (likely invocation coordinates [INFERENCE]).
