@@ -1,6 +1,6 @@
 # Mario Kart World
 
-Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Bring-up in progress: headless on the Mac it boots through `nninitStartup`, `nnMain` and the SDK's initialization to the NVN2 device, where it stops (NVN2 is not implemented yet).
+Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Bring-up in progress (wave 2): headless on the Mac it boots through `nninitStartup`, `nnMain`, the NVN2 device and its graphics setup, and renders its loading screen (the world map with the MARIO KART WORLD logo) at 2560x1440 for about 130 frames, where Metal runs out of memory uploading its sparse virtual textures whole ([Graphics status](#graphics-status-wave-2)).
 
 ## Build
 
@@ -27,7 +27,7 @@ All three modules have `DT_INIT`, which runs their `DT_INIT_ARRAY` (main 2,866 e
 3. `nnMain` (`main+0xcf2370`): mounts the RomFS, reads `System/HeapSize/Default.Nin_Ounce_NVN2.HeapDef.byml.zs` (`ProductME…` first, absent), `nv::InitializeGraphics(…, 0)`, `vi::OpenDefaultDisplay` / `CreateLayer` / `GetDisplayVsyncEvent`, then the NVN2 device (below).
 4. With a working device (seen only through the look-ahead below): the Presentation, Prepare, Vibration and gear::Prepare threads; `RegionLangMask.txt`, `AddressTable/Product.100…atbl.byml.zs`; hid; `oe::Initialize`, `oe::SetFocusHandlingMode 2` and the graphics scale calls; the sound setup (aal, Opus); the save data managers (five save commits at first boot); Pia; job pools of one worker per core 0-5 (`ModuleSystemWorker`, `BaseProcExecutor`, `UIJob`, `phive::DepWorker`); resource loading (`Model/…bfres.zs`, `RSDB/…`).
 
-## The NVN2 boundary (current stop)
+## The NVN2 device (wave 1 stop, resolved)
 
 `nnMain`'s graphics setup (`main+0xcf3a14` on) makes these NVN calls first:
 
@@ -37,11 +37,33 @@ All three modules have `DT_INIT`, which runs their `DT_INIT_ARRAY` (main 2,866 e
 4. The proc loader again with the device.
 5. `nvnDeviceGetInteger(device, 0)` and `(device, 1)`: main requires API major 0xE7 (231) and minor 0x10 (16) or more (`main+0xcf3b20`).
 
-The host's NVN reports 55.15, so `nnMain` leaves its graphics setup at `main+0xcf3d54` without an error and without creating its 0x260-byte graphics object (stored at `main+0x33dcfb0`); `sead::MethodTreeMgr`'s next call reads it (`main+0xe56e70`, from `main+0xc205f4`) and the boot ends with `CRASH sig=11 addr=0x20`. This is where NVN2 has to start: the same names as NVN1 do not prove the same ABI, so the NVN1 implementations are not adapted to it.
+With 55.15 `nnMain` left its graphics setup at `main+0xcf3d54` without creating its 0x260-byte graphics object (`main+0x33dcfb0`), and `sead::MethodTreeMgr` then read it (`main+0xe56e70`: `CRASH sig=11 addr=0x20`). Resolved: the host answers 231.16 with the NVN2 device-info table for Switch 2 games (b6d2fca8), and `nvnPrivate0` reads 0 at `nvnDeviceInitialize` ("NVN2: nvnPrivate0 is 0"), so main calls every fetched NVN function and inlines no header code.
 
 ### Look-ahead past the device check
 
 `DM_NVN_API=231.16` (an existing diagnostic switch, no code change) makes the NVN1 implementations answer the version check, to see what comes after it. That runs NVN2 calls through NVN1 implementations of unverified ABI: what it shows about graphics is a list of names, not behaviour. The calls that followed, in order: `nvnDeviceGetInteger` items 0x2a, 0x5a, 0xf, 0x10, 0x11, 0x12, 0x55, 0x14, 0x19, 0x1a, 0x18; a 0x423000-byte memory pool (flags 0x22); a sampler pool of 4096 and a texture pool; `nvnQueueInitialize` (after `nvnQueueBuilderSetPrimaryQueue`, unimplemented); a 0x2d00000-byte pool and three 2560x1440 textures (format 0x25) for a three-texture window at interval 1; buffers; `nvnProgramBuilderSetDefaults` / `SetDevice` / `SetShaders` and `nvnProgramInitializeFromBuilder` (unimplemented); then from the frame threads `nvnCommandBufferSetRecordingMode`, `SetGeometryProcessingMode`, `SetStencilCullCriteria`, `ShadingRateImagePalette`, `BindShadingRateImage`, `PushGraphicsConstants`, `SetComputeOverlapMode` and `DrawMeshTasks` (all unimplemented). Every non-graphics call on that path was answered; the run ended in the host's shader hashing (`keys_hash` from `nvnQueueSubmitCommands`, reading a program through the NVN1 layout).
+
+
+## Graphics status (wave 2)
+
+From the NVN2 agents' runs (`$W/run/Nvn2*/`), headless:
+
+- Device and objects: 5 queues (one with flags 9, the secondaries through `nvnQueueBuilderSetPrimaryQueue`); the window is 2560x1440 RGBA8 with 3 textures, `SetNumActiveTextures` 2 / 3 (honoured since 31401b1d), present interval 1 → 2 → 1 during start-up; the first present comes within about 4 s. 3,165 memory pools in the first 40 s: 26 GB of pool address space, 21.9 GB of it in 42 virtual pools with flags 0x2a1 (VIRTUAL | COMPRESSIBLE), 1.15 GB in 17 physical pools (0x18c), 2.8 GB in 958 pools 0x24.
+- Programs (`nvn2_prog.c`): stage combinations in the first ~200 frames are vertex + fragment, compute, fragment + task + mesh and fragment + mesh; mesh draws are recorded and skipped (`[RED]`). The first ~160 frames use 176 shader keys (48 vertex, 69 pixel, 59 compute), all in `shader_map.tsv`; with chain 47812e5710bf (891e4fdb) all of them translate, and the loading screen renders (`DM_NVN_SHOT` PNGs of frames 30-130 in `$W/run/Nvn2ProgPresent/r5_*.png`, a subset shader build through `own_compilers.py`). Earlier black frames were the vertex shaders of every fullscreen pass waiting for `I2FP` (0x245).
+- Command buffers (`nvn2_cmd.c`, 8c27f6af): every entry MKW calls is implemented or documented: `SetRecordingMode` (17 sites, modes 0 / 1 / 2), `PushGraphicsConstants`, `DrawMeshTasks` (recorded, replay skips, `[RED]` count), `SetGeometryProcessingMode` (1 / 2 around mesh draws, 0 after), `SetStencilCullCriteria(3, 0xff, 0xff)` (`main+0x16d73f8`), `SetComputeOverlapMode` (3 sites), shading-rate palette / image / mode (full rate; MKW binds a rate image and uses rate 8 = 2x2 in viewport 0 entry 13). Constant bank 24 is the game's own push constants (root table slot 0): `main+0x16d72e8` pushes {1/W, 1/H, W, H}, read at bytes 0..0xC by five programs (vertex 04a209f2e78754bd, 44a7c58cc83a175c, 8e51162d7b83d387; pixel 3b45dca2b9307e8c, d6c0f83282009305); the host binds it (89a4c38b). It is not a console-provided blit block.
+- Textures: Switch 2 GOBs are Switch 1 GOBs with in-GOB offset bits 5 and 6 exchanged (070ad81e). The BNTX files (platform `Ounc`) keep a packaged layout u16 at BRTI +0x34 (nibble 0: log2 block height, 1: depth, 2: log2 of the 64 KB sparse tile width in GOBs; 0x403 grass BC4, 0x304 height maps); for all 53,607 textures in `Tex/` the host's level offsets and storage equal the files'. Formats in `Tex/`: R16 16.7k, ASTC 8x8 25.1k (13.3k unorm, 11.9k sRGB), ASTC 6x6 4.0k, BC4 2.8k, BC6H 2.0k, BC5 0.8k, BC1 0.5k. `TextureBuilderSetFlags` sites never set NVN2's new flags 0x800 / 0x1000 / 0x2000 (flags built at `main+0x994f8` / `+0x2321f4`).
+- Current stop: sparse virtual textures uploaded whole. At run time MKW makes 8192x8192x68 ASTC 8x8 sRGB (0x8e) arrays in 1.45 GB VIRTUAL | COMPRESSIBLE pools and 8192x8192x68 BC6H (0x50) arrays in 5.8 GB ones (texture flag 0x20 SPARSE, 12 levels), 8192x8192 RG16 (0x12) / R16 (0x06) 5-level sparse terrain textures and a 6144x6144x2 RGBA8-snorm (0x26) array; frame 117 uploads 45 textures / 8.8 GB in 7.8 s, then Metal `Insufficient Memory` (`kIOGPUCommandBufferCallbackErrorOutOfMemory`) from about frame 120-160 on uploads and the main command buffer, and a hang in `SyncWait` (`main+0x25ec590` → `h_nvnSyncWait`). Nvn2Tex is backing sparse textures by their committed tiles.
+- `vi`: `QueryDisplayHdrStatus` answered HDR off at 100 cd/m2; VRR unsupported, so the extended swap interval path (`main+0x226cdcc`..`+0x226ce38`) clears it.
+
+## Movies
+
+All 49 RomFS movies (`Movie/*.webm`, the cup openings 2560x1440 at 60 fps, e.g. `KinokoOp.webm` 1,423 frames) are VP9 WebM without an audio track. The player (`main+0x6d7000`..`+0x711600`, decoder wrapper `main+0x19e5000`..`+0x19ee000`) feeds `nn::movie::MediaExtractor` itself (`AppendMediaSourceData`) and submits its samples to the `nn::codec` VP9 decoder:
+
+- decoder created as codec 1 (VP9), output format 3, codec mode 1 (`main+0x7110c0`); `MakeDecodeImagePreference(w, h, 3, 1)` → layout code 1 (NV12); two to eight output buffers, each a one-image pool (`main+0x19e78a4`) registered at once (`main+0x19e60a0`);
+- frames are waited for with `nn::syncpt::sdk` events: `TryWait`, `Cancel` if unsignalled, `Request` on the acquired buffer's handle, then a multi-wait over all buffers (`main+0x19e7760`, `+0x19e724c`);
+- the buffers are type 1 (CPU, `main+0x711124`): each frame is copied out with `ReadDecoderOutputImageNv12` into the player's own w×h×3/2 buffer (`main+0x19e7950`) and uploaded through NVN; the native image handle path (type 3) is never used; images are released with an all-zero sync handle (`main+0x19e6e00`).
+
+The host serves all of it: [The Switch 2's `nn::codec` video decoders and image pools](../../../docs/reference/movies.md#the-switch-2s-nncodec-video-decoders-and-image-pools), [Sync point events on host counters](../../../docs/reference/movies.md#sync-point-events-on-host-counters-nnsyncptsdk); `MediaExtractor` and the AAC decoder run as the game's own code. Checked headless with `dm/host/tests` `build/t_codec_video /Users/emanuel/Games/Switch/base/romfs/Movie/KinokoOp.webm 120 out.png`: the Mushroom Cup opening goes through the same SDK calls and frame 120 (2.000 s) comes out right (121 frames in 0.63 s). Not reached in a boot yet: the movies come after the loading screen.
 
 ## Shaders
 
@@ -68,6 +90,10 @@ There are no loose code areas: every program header in the RomFS and in main lie
 - [The Switch 2's `svcSetGpuMemoryAttribute` (svc 0x80)](../../../docs/reference/memory.md#the-switch-2s-svcsetgpumemoryattribute-svc-0x80) (from its modules; not met yet).
 - [The Switch 2's graphics scale (`oe`)](../../../docs/reference/services.md#the-switch-2s-graphics-scale-oe): a null read on the Prepare Thread (look-ahead run).
 - [Audio device calls of the Switch 2 SDK](../../../docs/reference/audio.md#audio-device-calls-of-the-switch-2-sdk): an abort opening `aud:u` (look-ahead run).
+- [Switch 2 output streams and virtual output devices](../../../docs/reference/audio.md#switch-2-output-streams-and-virtual-output-devices) (from the binary: `main+0xb9f35c` and `+0x261dd00`; not met yet).
+- [The Switch 2's `nn::codec` video decoders and image pools](../../../docs/reference/movies.md#the-switch-2s-nncodec-video-decoders-and-image-pools), [Sync point events on host counters](../../../docs/reference/movies.md#sync-point-events-on-host-counters-nnsyncptsdk) and [`MediaExtractor` and the AAC decoder run natively](../../../docs/reference/movies.md#nnmoviemediaextractor-and-the-aac-decoder-run-natively) ([Movies](#movies)).
+- [NVN2 command buffers (Switch 2)](../../../docs/reference/rendering.md) (Nvn2Cmd, ad8eaa55): bank 24, the new command-buffer entries ([Graphics status](#graphics-status-wave-2)).
+- [Switch 2 block-linear GOBs](../../../docs/reference/nvn-objects.md#switch-2-block-linear-gobs): the exchanged in-GOB offset bits.
 - `vi` HDR and VRR calls (`QueryDisplayHdrStatus`, `QueryDisplayVrrSupported`, `QueryDisplayHdrPaperWhite`, `SetDisplayVrrCapability`): the SDK answers 0x272 (or nothing) for a display that is not its own `DefaultDisplay` (`sdk+0xe151f8`), and the host's is not, so main takes its no-VRR, no-HDR path (`main+0x226cce4`) without reaching the vi2 service. Not hooked.
 
 ## How to run it on the Mac
@@ -79,13 +105,12 @@ cd $W/run && DM_ROMFS=/Users/emanuel/Games/Switch/base/romfs DM_SAVE=$W/run/save
   perl -e 'alarm shift; exec @ARGV' 60 dmhost $W/patched
 ```
 
-`DM_SVC=1 DM_THR=1 DM_FS=1 DM_NVN_LOG=1` for the boot details; `DM_NVN_API=231.16` for the look-ahead (it ran about 4 s of loading before its crash).
+`DM_SVC=1 DM_THR=1 DM_FS=1 DM_NVN_LOG=1` for the boot details. Agents run it only through `$W/run/lockrun.sh <name> <log> <seconds> [VAR=value …]` (one host build and run at a time). `DM_NVN_API` is no longer needed: the host answers NVN2's 231.16 for Switch 2 games.
 
 ## Open
 
-- NVN2: the device and everything after it (Nvn2RE; `docs/reference/nvn2.md`). Values the game queries: `nvnDeviceGetInteger` items listed above.
-- SM86 shaders: none are translated yet. The host's shader key follows NVN2's control section (`nvn_shader_key.h`: 0xd8 control bytes, code length at +0x44), so with ShaderExtract's map (`DM_NVN_SHMAP=$W/shader/split/shader_map.tsv`) the look-ahead finds every program it sets in the map; it then stops for want of their Metal libraries (a crash in `bind_stages`).
-- Not yet met, unhooked in main's imports: `nn::syncpt::sdk` events (Create / Request / TryWait / Cancel / Destroy `SyncPointEvent`, `InitializeMultiWaitHolder`: NVN2's GPU fences, to be answered with the host's NVN2 sync), the audio virtual output device and output stream calls, `nn::codec` video decoders (`video::Initialize`, `Register{H264,Vp8,Vp9,Av1}DecoderBuffer`, `GetDecoderImagePoolNativeImageHandle`: native images of `nn::gs`; the Mushroom Cup opening is a 2560x1440 VP9 movie), the `nn::socket` calls behind Pia, `nn::ssl::Context::Create`.
-- Movies: main uses the Switch 2 movie API, not the `nn::movie::Decoder` the host takes over (`hle_movie.c`): `nn::movie::MediaExtractor` (41 `nn::movie` imports, none hooked) feeding the `nn::codec` video decoders above, whose pictures are `nn::gs` native images. The host's movie path (libvpx) has to be put behind those calls.
-- `nvnPrivate0` (a u32 in sdk's bss, `sdk+0xedb150`, imported by main) gates main's inlined NVN2 command-buffer paths; it must stay 0, which it does as long as the sdk's own `nvnDeviceGetProcAddress` never runs (its only sdk callers, `nvnSyncInitializeFromNativeSyncHandle` and `nvnNativeImageInitialize`, reach `nvnBootstrapLoader` through the PLT, which the host takes over).
+- Sparse virtual textures (Nvn2Tex): the current stop, see [Graphics status](#graphics-status-wave-2).
+- Mesh and task shaders (7 + 18 programs, `ISBERD` / `ISBEWR`): not translated, their draws are skipped. The per-primitive shading rate index (`a[0x5c]`, written by 2,838 vertex programs) is dropped, so those draws shade at full rate; two programs reach global memory through a pointer read from a storage buffer (0459a55e79335cf6, 791fb7522aa03e61) and lose those accesses.
+- Movies, output streams and the socket calls behind Pia are served but not met in a boot yet. Pia's network start (`main+0x22477b4`) stops at `nifm::IsNetworkAvailable` (false), before `nn::socket::internal::Initialize`; the SDK 19 socket overloads it would call next (`Socket(Family, Type, Protocol)`, `Bind(SockAddr)`, `SetSockOpt(Level, Option)`, `Close`, `EventFd*`, `GetPeerName(sockaddr)`, `GetAddrInfo` with resolver options, `Resolver{Get,Set}Option`, `IsInitialized`, `SetAllocator`) and `nn::ssl::Context::Create` (which returns 0xca7b without a service session) are not hooked.
+- AV1 movies: the host has no AV1 decoder (`InitializeAv1Decoder` fails with a red line); MKW has none.
 - The Switch 2's display: `oe::GetDefaultDisplayResolution` answers the Switch's 1920x1080 / 1280x720; MKW does not import it.
