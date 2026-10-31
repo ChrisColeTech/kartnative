@@ -8,12 +8,14 @@
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
+# Switch 2 (NVN2) records are SM86 programs, which the translator reads with its SM86 frontend (sm86_code); task and mesh programs have no translation yet, and an SM86 program the frontend
+# did not translate whole gets no library (sm86_blockers): the summary counts both, per stage, with a histogram of what stopped them. DMSH_KEEP_WORK=1 keeps the work folder (jobs, code, SPIR-V, res.json)
 import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, tool_lock, nvn2_shader as nvn2   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -440,22 +442,37 @@ def early_fragment_tests(ctl, code):
     is left as it is: tested early, the depth it computes would not be the one tested"""
     return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
+def sm86_code(rec):
+    """(stage, code, c1) of a Switch 2 (NVN2) program's record, None for a Switch 1 one. NVN2 programs are SM86 machine code, which the translator reads with its SM86
+    frontend (job isa sm86, docs/reference/shaders-sm86.md). The code area and control section come by the lengths shader_split.py writes (+0x28 control, +0x2c code). The code
+    is the code area up to control +0x38: a graphics stage's 0x80-byte program header (a Maxwell SPH in its first 0x50 bytes) and its instructions, a compute stage's
+    instructions only; c1 is the constant segment (control +0x40, +0x3c bytes: BRX tables). The 0xd8-byte NVN2 control section has none of the Switch 1 fields job_for
+    reads (c1 at +0x700, transform feedback at +0x6dc, early fragment tests at +0x718); where NVN2 keeps the last two is not known yet, so neither is set"""
+    nctl, ncode = struct.unpack_from('<2I', rec, 0x28)
+    code, ctl = rec[0x38:0x38 + ncode], rec[0x38 + ncode:0x38 + ncode + nctl]
+    if not nvn2.is_control(ctl): return None
+    return nvn2.stage(ctl), code[:nvn2.control(ctl)['code_end']], nvn2.c1(ctl, code)
+
 def job_for(key, name, rec, w):
-    ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
-    c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
-    c1 = rec[0x38 + c1o:0x38 + c1t]
-    ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
-    if ab: code, c1 = ab
-    if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
-    elif code[:4] == bytes.fromhex('79563412'):
-        # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
-        # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
-        if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
-        code = code[0x100:]
+    sm86 = sm86_code(rec)
+    if sm86: (stage, code, c1), extra = sm86, {'isa': 'sm86'}
+    else:
+        ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
+        c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
+        c1 = rec[0x38 + c1o:0x38 + c1t]
+        ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
+        if ab: code, c1 = ab
+        if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
+        elif code[:4] == bytes.fromhex('79563412'):
+            # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
+            # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
+            if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
+            code = code[0x100:]
+        tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
+        ez = stage == 'ps' and early_fragment_tests(rec[ci:], code)
+        extra = {**({'tf': tf} if tf else {}), **({'early_fragment_tests': True} if ez else {})}
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
-    tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
-    ez = stage == 'ps' and early_fragment_tests(rec[ci:], code)
-    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}), **({'early_fragment_tests': True} if ez else {}),
+    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
@@ -684,7 +701,9 @@ def reflect(key, stage, msl, res):
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(re.fullmatch(r'[a-z]+_c(\d+)', nm).group(1))
-            e.update(kind=abi.KIND_CBUF, reg=n - 3) if 3 <= n <= 16 else e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
+            if 3 <= n <= 16: e.update(kind=abi.KIND_CBUF, reg=n - 3)
+            elif abi.PUSH_BANK0 <= n < abi.PUSH_BANK0 + abi.PUSH_SLOTS: e.update(kind=abi.KIND_PUSH, reg=n - abi.PUSH_BANK0)   # an NVN2 push-constant block (SM86 banks; Maxwell names none past 17)
+            else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
@@ -758,7 +777,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # CODE_FP hashes the code form of this file and its helper modules (dmsh_chain.code_form): editing a comment, a docstring or the layout does not change any shader's key.
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # The first-stage code fingerprint does not include dmsh_fetch.py; readable-tile variants get a separate second-stage cache keyed on the generated MSL.
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, abi, nvn2) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
@@ -1205,15 +1224,32 @@ for key in keys: recs[key] = rec_of(key); digests[key] = shader_key(key, *recs[k
 def plain_digest(k):   # a paired pixel shader's key, also when it is not built this time
     if k in digests: return digests[k]
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
+# Stages the translator has no output for: a Switch 2 program's task and mesh stages (NVN2, nvnCommandBufferDrawMeshTasks) are counted and left without a library
+NO_STAGE = {'ts': 'task', 'ms': 'mesh'}
+untranslated = {key for key in keys if loc[key][0][:2] in NO_STAGE}
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
 for key in keys:
     name, rec = recs[key]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
+    if key in untranslated: continue
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
     else: jobs[key], c1s[key] = job_for(key, name, rec, w)
-misses = [key for key in keys if key not in cache_hits]
+misses = [key for key in keys if key not in cache_hits and key not in untranslated]
+# An SM86 program the translator could not translate whole: the frontend logs an instruction it has no emitter for, or a variant its emitter does not implement, and emits
+# nothing for it (docs/reference/shaders-sm86.md); BRX targets or a call target it cannot find leave the control flow wrong. Such a program gets no library: drawn with
+# instructions missing it would render wrong. Its items (opcode or variant, addresses left out) feed the summary's histogram. Other SM86 notes are approximations and are kept
+SM86_BLOCKING = re.compile(r'Unsupported SM86 instruction|is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at')
+def sm86_blockers(notes):
+    items = set()
+    for n in notes:
+        m = n[len('translator: '):] if n.startswith('translator: ') else ''
+        if not SM86_BLOCKING.search(m): continue
+        u = re.match(r'Unsupported SM86 instruction (0x[0-9a-fA-F]+)', m)
+        items.add(f'opcode {u.group(1)}' if u else re.sub(r' at 0x[0-9A-Fa-f]+', '', m).rstrip('.'))
+    return items
+SM86_BLOCKED = {}
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):
     jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
@@ -1230,7 +1266,11 @@ def fin(key):
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
         return key, 'ok', '', fetch_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl)))
+    if key in untranslated: return key, 'not translated', f'{NO_STAGE[loc[key][0][:2]]} stage: the translator has no task or mesh stage', None
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
+    if jobs[key].get('isa') == 'sm86':
+        blocked = sm86_blockers(json.load(open(os.path.join(w, key + '.res.json')))['notes'])
+        if blocked: SM86_BLOCKED[key] = blocked; return key, 'SM86 incomplete', ', '.join(sorted(blocked))[:160], None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
     return result
@@ -1255,9 +1295,18 @@ def mesh_finish(pair):
 _mesh = GAME.table('geo_mesh.tsv')
 if _mesh.exists():
     with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, [tuple(ln.split()[:2]) for ln in _mesh.read_text().splitlines() if ln.strip() and not ln.startswith('#')]))
-shutil.rmtree(w, ignore_errors=True)
+if os.environ.get('DMSH_KEEP_WORK') == '1': print(f'work folder kept (DMSH_KEEP_WORK=1): {w}', flush=True)   # jobs, code, SPIR-V and reflection of every shader translated this run
+else: shutil.rmtree(w, ignore_errors=True)
 st = collections.Counter(r[1] for r in res)
 print(f'shaders {len(res)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))
+by_stage = collections.defaultdict(collections.Counter)   # by the package's stage prefix (shader_split.py: vs, ps, cs, gs, ...; Switch 2 also ts task, ms mesh)
+for r in res: by_stage[loc[r[0]][0][:2]][r[1]] += 1
+for _s, _c in sorted(by_stage.items()): print(f'  {_s}: {sum(_c.values())}, ok {_c["ok"]}' + ''.join(f', {k} {v}' for k, v in _c.items() if k != 'ok'))
+if untranslated: print(f'[RED] {len(untranslated)} task / mesh programs not translated (' + ', '.join(f'{v} {sum(loc[k][0][:2] == s for k in untranslated)}' for s, v in NO_STAGE.items()) + '): the translator has no task or mesh stage, so they have no library', flush=True)
+if SM86_BLOCKED:   # per item: the programs it is in, and those it alone keeps from translating
+    print(f'[RED] {len(SM86_BLOCKED)} SM86 programs not translated whole, so without a library; what the translator did not translate: programs with it, programs with only it', flush=True)
+    _sole = collections.Counter(next(iter(b)) for b in SM86_BLOCKED.values() if len(b) == 1)
+    for e, n in collections.Counter(i for b in SM86_BLOCKED.values() for i in b).most_common(): print(f'  sm86 {n:5d} {_sole[e]:5d}  {e}')
 print(f'shader cache: hit {PRE_STATS["hit"]}, rebuilt {PRE_STATS["miss"]}')
 for reason in ('new key', 'rule changed', 'code fingerprint changed: all rebuilt'):
     if PRE_STATS[reason]: print(f'  {reason} {PRE_STATS[reason]}')

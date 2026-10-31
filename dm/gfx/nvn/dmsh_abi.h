@@ -58,6 +58,12 @@
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_build.py pool_arrays): elem = the element type
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_build.py border_emu): a mask of the samplers to correct, then each one's factors
+#define DMSH_KIND_PUSH "push"            // an NVN2 push-constant block, reg = its index (bank - DMSH_PUSH_BANK0)
+
+// NVN2 push constants (nvnCommandBufferPushGraphicsConstants: Ampere's root table, methods 0x504 / 0x508): block k (up to 256 bytes) is constant bank DMSH_PUSH_BANK0 + k of an
+// SM86 graphics program; the host binds the bytes the command buffer pushed last (nvn_mtl.m). Mario Kart World pushes {1/W, 1/H, W, H} into block 0
+#define DMSH_PUSH_BANK0 24               // the constant bank of push block 0
+#define DMSH_PUSH_SLOTS 8                // push blocks (slot & 7)
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 8                 // bytes before element 0 of a pool buffer
