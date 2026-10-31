@@ -92,6 +92,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** [`dm/gfx/hle_nv.c`](../../dm/gfx/hle_nv.c) answers the five `nv::` symbols such a game imports: it records the allocator callbacks (`SetGraphicsAllocator`, `SetGraphicsDevtoolsAllocator`) and the pool from `InitializeGraphics(void*, size_t)`, and `GetGraphicsMemoryInfo` reports that pool (total and free = its size) or zeroes the structure when nothing was initialised. It writes the record of the game's SDK: 0x20 bytes when `DM_SDK_OLD(dm_sdk_major())`, 0x40 otherwise (the boundary the NVN API version and the shared-font layout follow too); the pool figures lie in the first four counters, so both sizes carry them.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0, GameMaker Studio 2, OpenGL through EGL). The game's allocator is never called again, so a zeroed report is equally correct on a GL-only title. The 32-byte overrun on old SDKs was found on Hyrule Warriors: Definitive Edition 1.0.1 (SDK 3.5.1, KTGL, NVN; GitHub issue #708, [PR #709](https://github.com/seedds/nxnative/pull/709)): its startup caller passes a 32-byte record, and AddressSanitizer reported the write past it.
 
+### `nv::InitCheck` after the host's `nv::InitializeGraphics`
+
+- **Symptom:** `game called nn::diag abort: Result 0, call site sdk+0x54e09c` when a movie starts, backtrace `main+0x19e5784 main+0x711574 main+0x7110d0` (Mario Kart World 1.0.0, the Mushroom Cup opening `Movie/KinokoOp.webm`).
+- **Cause:** `nv::InitCheck` (`sdk+0x54e040`) aborts unless `nv::InitializeGraphics` stored its pool in the SDK's own static (`sdk+0xed3b50`); the host takes `nv::InitializeGraphics` over (above), so that static stays empty. Main's VP9 decoder wrapper calls `nv::InitCheck` before `nn::codec::video::Initialize` (`main+0x19e5780`).
+- **Fix:** [`dm/gfx/hle_nv.c`](../../dm/gfx/hle_nv.c) answers `nv::InitCheck` from its own record of `nv::InitializeGraphics`; the host's graphics layer needs no initialisation, so a check before it only logs a red line where the SDK would abort.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0 (SDK 19.3.3).
+
 ### The Switch 2's 12 GB layout
 
 - **Symptom:** `SetHeapSize OOM: req 0x69000000 > cap 0x8000000`, then SIGSEGV in `StandardAllocator` (`sdk+0x135110`, from `nninitStartup`).

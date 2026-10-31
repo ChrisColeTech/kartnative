@@ -1,6 +1,7 @@
 // nv:: (the GPU driver glue layer beneath NVN: creates transfer memory, connects to the nvdrv service). NVN has been replaced wholesale with a host null device, so this layer has nothing to do.
 // The allocator callbacks are recorded in the host global g_nv_alloc; the graphics layer takes them from here later when it needs to allocate memory with the game's allocator.
 #include "../host/hle.h"
+#include <stdatomic.h>
 
 typedef void *(*nv_alloc_fn)(unsigned long size, unsigned long align, void *user);
 typedef void (*nv_free_fn)(void *p, void *user);
@@ -20,6 +21,13 @@ HLE_FORCE("_ZN2nv18InitializeGraphicsEPvm", WHY "; pool recorded for nv::GetGrap
     LOG("nv::InitializeGraphics: pool %.2f MB, recorded (the host's graphics layer allocates its own)", size / 1048576.0);
 }
 HLE_FORCE("_ZN2nv16FinalizeGraphicsEv", WHY, void, h_nv_Fin, void) { g_nv_pool = (typeof(g_nv_pool)){0}; }
+// nv::InitCheck aborts unless nv::InitializeGraphics stored its pool in the SDK's own static (sdk+0xed3b50 in Mario Kart World's SDK 19.3.3); the host takes
+// InitializeGraphics over, so that static stays empty and the SDK's check aborted the first movie (main's VP9 decoder wrapper calls it before
+// nn::codec::video::Initialize, main+0x19e5780). The host's graphics layer needs no initialisation, so the check only reports a call the SDK would abort
+HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; checks the host's record of nv::InitializeGraphics", void, h_nv_InitCheck, void) {
+    static _Atomic int once;
+    if (!g_nv_pool.inited && !atomic_exchange(&once, 1)) LOG("[RED] nv::InitCheck before nv::InitializeGraphics: the SDK would abort here");
+}
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,
