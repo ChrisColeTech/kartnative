@@ -14,6 +14,8 @@ Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the hos
 
 The host key is `sha256(control[0:0x880] + code)[:16]` (`prog_get` in `nvn_mtl.m`, `shader_split.py`). D2R keyed by the control section alone; in Mario, 6,367 shader pairs share a control section but differ in code. A different code length or layout in a new title must be reflected in both places.
 
+A Switch 2 (NVN2) title's stages have a 0xd8-byte control section (0xc9 at +0x04) and SM86 code, and the key hashes those 0xd8 bytes + the code area (control +0x44 bytes) ([reference/shaders.md](../reference/shaders.md#switch-2-nvn2-shader-binaries)); `shader_split.py` reads them in the same containers. `dm/gfx/tools/nvn2_dump.py <pkg dir> <map> <out dir> <census.tsv> [<NAK sm70_encode.rs>]` writes each program (`<key>.bin`, `.c1.bin`, `.meta.json`) and the per-opcode census that SM86 translator work starts from.
+
 ## 3. Find the binding layout by census
 
 The NVN driver puts its binding tables in driver constant banks. Every game so far, NVN 53 and 55 drivers from SDK 6 to 21, has the one layout below, which `dmsh_build.py` decodes and `nvn_mtl.m` fills at run time. Check a new game against it with a census of what its translated shaders reference (the translator alone takes seconds) rather than assuming it.

@@ -397,6 +397,48 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `shader_split.py` `ue3_package` / `ue3_body` decode a package's chunks (Zlib in Python, Oodle with the game's own decoder through the Mac host's tool mode, `DM_OODLE_SERVE`), and `ue3_shaders` finds each record by its control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front. `profile_guess.py` counts the packages whose first block is Oodle, so the NSP script gives the split the host. All of the game's 4,058 packages are decoded (the whole split took about a minute); none of 68 packages sampled besides the combined cache holds a shader.
 - **Found on:** [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md): 1,847 records in the global cache and 22,874 in the combined one, 21,923 shaders with the profile's [`shader_key_skip`](#control-sections-shared-among-shaders-that-differ-only-in-their-compile-information). Vertex and pixel shaders are paired as single-stage programs.
 
+## Switch 2 (NVN2) shader binaries
+
+NVN2 keeps Switch 1's split of each stage into a control section and a code area, and Nintendo's containers keep their layouts; what changes is the control section, the code area's header and the instruction set (SM86). `dm/gfx/tools/nvn2_shader.py` reads them, `shader_split.py` routes every NVN2 control section through it, and `nvn2_dump.py` writes each program and an instruction census for translator work.
+
+### NVN2 containers in Mario Kart World
+
+- **How it is stored:** a scan of all 205,788 RomFS files (zstd and SARC opened) and the three code modules for the control magic finds NVN2 stages only in these: `Shader/*.Nin_Ounce_NVN2.bfsha.zs` (BNSH; header version 2.4.0, 2.3.1 in `GridifyRoad`; the same `grsc` layout, variation table and stage descriptors as on Switch 1, with only the vertex and pixel slots used), `Shader/Drive.Nin_Ounce_NVN2.release.sarc.zs` (one more bfsha and two agl `sharcb`, BAHS version 11, which hold the compute, task and mesh stages), `Layout/*.blarc.zs` (`bgsh/__ArchiveShader.bnsh`, 79 archives), `Effect/static.Nin_Ounce_NVN2.esetb.byml.zs` (two BNSH), the `Lib/` resource packs (agl, gsys, Terrain, Visualizer: BAHS version 11), agl's `agl_ndsr.pck`, sead's `*_nvn2_shader*.bin`, and two BNSH in `main` (48 variations). `sdk` and `subsdk0` hold none, and no `bfres` does.
+- **BAHS version 11:** the Switch 1 entry layout (`{code offset, 0, control size, signed offset to the control}`) with control size 0xd8; record kinds 0 vertex, 1 fragment, 3 compute, 4 task, 5 mesh. Its control sections leave +0x20..+0x37 zero (no debug hashes, +0x30 = 0).
+- **NDSR (`agl_ndsr.pck`):** `'NDSR'`, version 0x300, BOM, entry count at +0x0a, then 8-byte entries `{offset, size << 4 | type}`: type 0 / 3 / 6 the control section of a vertex / fragment / compute stage, followed by its code area's entry (type + 1); types 9–12 are data. Its 30 compute stages all use HMMA (tensor-core matrix multiply).
+- **sead shader files:** four `u32` offsets `{vertex control, fragment control, vertex code, fragment code}`, the first control at 0x10. Their control sections carry a debug blob after the 0xd8 bytes (+0x30 = whole length): a header at +0xd8 (magic `0x37f20897`, then 0xc9 and the version) and the program's SPIR-V module from +0x128.
+- **Reader:** `shader_split.py` (`bnsh_shaders`, `bahs_shaders`) with `nvn2_shader.py` (`ndsr_shaders`, `sead_shaders`); the stage comes from the control section (+0x56) and must match the BNSH slot. New stage codes `ts` (task) and `ms` (mesh) give packages `ts_<group>.bin` / `ms_<group>.bin` and map stages `task` / `mesh`. The packages keep Switch 1's record format (`BTCDBTCD`, code area, then the whole control section). `test_nvn2_shader.py` covers each container with synthetic bytes, and that Switch 1 controls keep their keys.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0: 11,567 distinct programs (3,550 vertex, 7,264 pixel, 728 compute, 7 task, 18 mesh) in 3.5 minutes; Mario Kart 8 Deluxe's split (19,966 shaders) is byte-identical with the change.
+
+### NVN2 control section and code area
+
+- **Control section** (0xd8 bytes; the fields as read on all 11,567 of Mario Kart World's programs, what the driver checks as Nvn2RE read `nvnProgramSetShaders` in `sdk`):
+
+  | Offset | Content |
+  |---|---|
+  | +0x00 | magic `0x98761234`, as on Switch 1 |
+  | +0x04 | `0xc9` (Switch 1: 1): what tells the two apart (`nvn2_shader.is_control`) |
+  | +0x08 | version: 11, or 7 in `GridifyRoad`'s BNSH (the driver takes 0..11) |
+  | +0x0c, +0x0e | `u16` GPU architecture ids, 0x0170 and 0x000e; the driver refuses a program whose ids are not the device's |
+  | +0x20 | 16 bytes of debug hashes in BNSH and sead copies, zero in BAHS |
+  | +0x30 | control length including a debug blob (0xd8 without one; 0 in BAHS) |
+  | +0x38 | end of the instructions in the code area (header included; after the final `EXIT`, `BRA` to itself and `NOP` padding) |
+  | +0x3c, +0x40 | size and start of the constant segment: the program's `c[1]`. 360 programs have one, and no other program reads bank 1 |
+  | +0x44 | code area length (a multiple of 0x100) |
+  | +0x4c | register count: the highest register the instructions name + 3 in 1,037 of 1,106 vertex programs sampled |
+  | +0x56 | `u8` stage: 0 vertex, 1 fragment, 5 compute, 6 task, 7 mesh seen; 2 geometry, 3 tessellation control and 4 tessellation evaluation by NVN's stage order [inference] |
+  | +0x58.. | per stage. Compute: thread group x, y, z at +0x58 / +0x5c / +0x60 and shared memory bytes at +0x64 (the facts table's `local` / `shared`). Fragment: `u16` +0x62 = colour targets written (equal to the SPH's output target count in all 7,264). Task and mesh: `u16` +0x58 = 32 (8 in five mesh programs; threads [inference]), `u16` +0x5a = 0x580 or 0x100 in the task programs, 0x580, 0x100 or 0x80 in the mesh ones (the task payload size [inference]). Mesh: `u16` +0x60 / +0x62 = 0x20 / 0x10, 0x100 / 0xc0 or 0x80 / 0x40 (maximum vertices / primitives [inference]), `u8` +0x5f = 3, +0x64 = 0 to 0x4800 |
+
+- **Code area:** a graphics stage (task and mesh too) starts with a 0x80-byte program header, a compute stage with its first instruction (as Eglantine's notes say of compute). Instructions are 16 bytes (SM86). From +0x38 the area is zero up to +0x40; `[+0x40, +0x44)` holds the constant segment, or in 11 of the 18 mesh programs (no constant segment) a second SPH of geometry type (output topology 1, one output vertex). Switch 1's 0x30-byte code header with its `0x12345678` magic is gone.
+- **Program header:** bytes 0x50..0x7f are zero in all 10,839 graphics programs, and the first 0x50 decode as a Maxwell SPH (version 4, SASS version 6): vertex and task type 1 with shader type 1, fragment type 2 with shader type 5, mesh type 1 with shader type 3 (12) or 1 (6). The fragment output targets (word 18) match control +0x62 everywhere, and in 5,122 of the 5,175 BNSH variations every attribute the pixel shader's input map reads is in the vertex shader's output map (bits 432..559); the other 53 read one their vertex shader does not write, which `dmsh_build.py`'s `vs_pad` already handles on Switch 1. Bit 25 of word 0 (reserved on Maxwell) is set in 1,663 vertex and 12 mesh headers; its meaning is not known.
+
+### NVN2 program keys
+
+- **Key:** `sha256(control[0:0xd8] + code area)[:16]`: `ctl_len` gives an NVN2 control its fixed 0xd8 bytes (+0x20 is a hash there, not a length), and `same_shader` compares only those, so a sead file's debug blob is not part of the key.
+- **What the host sees:** `nvnProgramSetShaders`, `nvnProgramSetShadersExt` and `nvnProgramBuilderSetShaders` still take `NVNshaderData {u64 code GPU address, const void *control}` per stage (Ext adds a third pointer). The driver reads the code in place through the memory pools and takes its length from control +0x44, so the host can hash the same bytes. The driver patches the `NOP`s before a stage's final `BRA` with `MOV`s carrying the stage and a control value; the host replaces `SetShaders`, so nothing patches the code it hashes.
+- **Copies:** BNSH and BAHS copies of one stage differ in their control sections (+0x20..+0x37, +0x98, +0xbc, +0xc8), so they are two keys; the host sees whichever the game passes.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ## Control sections and code
 
 ### Code area and control section layout
