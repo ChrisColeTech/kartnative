@@ -19,6 +19,38 @@ Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk
 - `nvnDeviceGetProcAddress` (dispatch entry sdk+0x5b0fd0 → patchable slot sdk+0xd96748 → sdk+0x5b6610): for names starting with `nvn`, a binary search of the 698 names without their prefix (sorted, u32 string offsets at sdk+0xb79b90 into the string block at sdk+0xb74c26); hit k returns entry k of the active dispatch table (default sdk+0xd95168, 698 × 8 bytes; an interception layer can replace it). Misses go to a list of 32 extra names (sdk+0x5b5b40): `nvnCommandBufferCopyTextureToTextureWithCopyEngineNVX`, `nvnInstallGlobalDebugCallback`, `nvnQueueSetTimesliceNVX`, `nvnSyncGetSyncpointsNVX`, `nvnSyncInitializeFromNvRmSyncNVX`, `nvnSyncGetNvRmSyncNVX`, `nvnMemoryPoolBuilderSet/GetNativeHandleNVX`, `nvnMemoryPoolGetNativeHandleNVX`, `nvnQueueSetTimeoutNVX`, `nvnCUDAInteropFunction`, `nvnSetGLInteropNVX`, two obfuscated names (`H3ikr9ix`, `yK1NUEJH`), `nvnSetExternalDebuggerEnabledNVX`, `nvnMemoryPoolBuilderGetReservedAddressesNVX`, `nvnProgramGetDebugDataHashesNVX` and the `nvnInterception*NVX` family. MKW looks none of these up.
 - Two table entries are themselves patchable slots (interception): `nvnDeviceInitialize` (sdk+0x5b1050 → slot sdk+0xd96738 → sdk+0x5b5750) and `nvnDeviceGetProcAddress`. The other 696 entries point straight at their implementation. The implementation offsets are listed per object below.
 
+## Object sizes at a glance
+
+What MKW allocates for each NVN2 object (the reserved size its SDK headers give), what the driver itself touches, and NVN1's reserved size in `nvn.h`. Every host record in `nvn_obj.h` still fits; the details and evidence are in each object's section.
+
+| Object | NVN1 (`nvn.h`) | NVN2: MKW allocates | NVN2: driver touches |
+|---|---|---|---|
+| NVNdevice | 0x3000 | 0x3000 | 0x22c8 |
+| NVNdeviceBuilder | 0x40 | stack | 0x18 |
+| NVNqueue | 0x2000 | **0x3000** | 0x2cc0 |
+| NVNqueueBuilder | 0x40 | ≤ 0x50 (stack) | 0x48 |
+| NVNcommandBuffer | 0xA0 | **0xC0** | 0xB0 |
+| NVNmemoryPool | 0x100 | 0x100 | 0x100 |
+| NVNmemoryPoolBuilder | 0x40 | ≤ 0x40 (stack) | 0x38 |
+| NVNbuffer | 0x30 | 0x30 | 0x30 |
+| NVNbufferBuilder | 0x40 | stack | 0x28 |
+| NVNtexture | 0xC0 | **0x80** | 0x80 |
+| NVNtextureBuilder | 0x80 | 0x80 | 0x68 |
+| NVNtextureView | 0x28 | **0x10** | 0x10 |
+| NVNtexturePool / NVNsamplerPool | 0x20 | 0x20 | 0x20 |
+| NVNsampler | 0x30 | **0x40** | 0x40 |
+| NVNsamplerBuilder | 0x60 | **0x40** | 0x30 |
+| NVNprogram | 0xC0 | **0xA0** | 0xA0 |
+| NVNprogramBuilder | (new) | 0x80 | 0x64 |
+| NVNwindow | 0x180 | **0x280** | 0x218 |
+| NVNwindowBuilder | 0x40 | **0x80** | 0x60 |
+| NVNsync | 0x40 | 0x40 | 0x38 |
+| NVNevent | 0x40 | 0x40 | 0x28 |
+| NVNeventBuilder | 0x20 | stack | 0x10 |
+| State objects (blend 8, channel mask 4, color 4, depth-stencil 8, multisample 0x18, polygon 4, vertex attrib 4, vertex stream 8) | same | same | same |
+| NVNdlssNetworkBuilder / NVNdlssNetwork / NVNdlssParameters | (new) | not used | 0xC0 / 0x218 / 0xC8 |
+| NVNdeviceCommandBuffer / NVNdeviceMessageBuffer | (new) | not used | 0x30 / 0x28 |
+
 ## Device
 
 ### Version and creation
@@ -283,6 +315,695 @@ Every item not computed from the device comes from a static table (sdk+0x59bf50)
 | `nvnDeviceSetIntermediateShaderCache` | 0x5b1100 | 0 | same | no-op |
 | `nvnDeviceSetWindowOriginMode` | 0x5b1110 | 0 | same | device+0 (MKW has no static call: it keeps the default, 0) |
 | `nvnDeviceWalkDebugDatabase` | 0x5b1120 | 0 | same | no-op |
+
+## Resources: memory pools, buffers, textures, samplers and state objects
+
+Device-object offsets (`device+…`) refer to the driver's NVNdevice (zeroed over 0x22c8 bytes at sdk+0x5b447c; main allocates 0x3000).
+
+### Summary of changes versus NVN1 (nvn.h / nvn_obj.h)
+
+| object | NVN1 reserved (nvn.h) | NVN2 size | evidence | host struct (nvn_obj.h / hle_nvn.c) fits? |
+|---|---|---|---|---|
+| NVNmemoryPoolBuilder | 0x40 | driver uses 0x38 (SetDefaults writes +0x4..+0x38); game reserves ≤0x40 | sdk+0x5bcdb0; main+0x2480f0 frame (builder at sp, saved regs at sp+0x40) | pool_builder_t 0x20: yes |
+| NVNmemoryPool | 0x100 | **0x100** | Initialize zeroes 32 qwords (sdk+0x5bcef0); main embeds it at wrapper+0x40..+0x140 (main+0x2482c8, wrapper 0x190 bytes) | pool_t 0x28: yes |
+| NVNexternalMemoryPoolBuilder | — (new) | ≥0xc, [INFERENCE] 0x10 | sdk+0x612e30..0x612e70 touch +0x0 (u64) and +0x8 (u32) | n/a |
+| NVNbufferBuilder | 0x40 | driver uses 0x28 | sdk+0x59e180/0x59e190 | buf_builder_t 0x20: yes |
+| NVNbuffer | 0x30 | **0x30** | Initialize zeroes +0..+0x30 (sdk+0x59e1e0) | buf_t 0x28: yes (but its field offsets differ from the driver's, irrelevant unless the game reads fields) |
+| NVNtextureBuilder | 0x80 | driver uses 0x68; game reserves **0x80** | getters/setters up to +0x60 (sdk+0x5c8c60..0x5c9500); main iterates builders with stride 0x80 (main+0x2625f0, main+0xe2b9fc) | tex_builder_t: asserted ≤0x80, yes |
+| NVNtexture | 0xC0 | **0x80** | Initialize zeroes 16 qwords (sdk+0x5ca240); main memsets 0x80 before TextureInitialize (main+0x130388..0x130394) | tex_t ≤0x80 (already asserted): yes |
+| NVNtextureView | 0x28 | **0x10** | SetDefaults zeroes 16 bytes (sdk+0x5c9560); all fields within 0..0xf | view_t 16: yes |
+| NVNtexturePool / NVNsamplerPool | 0x20 / 0x20 | **0x20 / 0x20** | Initialize writes +0..+0x20 (sdk+0x5cad10, sdk+0x5c6690); main places them 0x20 apart (obj+0xd0, obj+0xf0, sampler at obj+0x110; main+0xcee088..0xcee130) | dpool_t 0x18: yes |
+| NVNsamplerBuilder | 0x60 | driver uses 0x30; game reserves **0x40** [INFERENCE] | fields up to +0x2c (sdk+0x5c6220); main zeroes exactly 0x40 bytes of a stack builder before SetDevice (main+0x1675080..0x16750a8) | samp_builder_t 0x30: yes |
+| NVNsampler | 0x30 | **0x40 (grew)** | Initialize zeroes 0x40 bytes and copies the builder to +0x8..+0x38 (sdk+0x5c6500); main zeroes 0x40 bytes before SamplerInitialize (main+0x1c5890..0x1c58ac) | samp_t 0x2c: yes |
+| NVNblendState | 0x8 | 0x8 | SetDefaults writes one u64 (sdk+0x5c69a0) | blend_st 8: yes |
+| NVNchannelMaskState | 0x4 | 0x4 | sdk+0x5c6b80 | yes |
+| NVNcolorState | 0x4 | 0x4 | sdk+0x5c6c10 | yes |
+| NVNdepthStencilState | 0x8 | 0x8 | sdk+0x5c6da0 | yes |
+| NVNmultisampleState | 0x18 | 0x18 | SetDefaults writes +0..+0x18 (sdk+0x5c7050) | ms_st 10 bytes: yes (needs one more bit for the new coverage-truncation flag) |
+| NVNpolygonState | 0x4 | 0x4 | sdk+0x5c6f80 | yes |
+| NVNvertexAttribState | 0x4 | 0x4 | sdk+0x5c6cd0 | yes |
+| NVNvertexStreamState | 0x8 | 0x8 | sdk+0x5c6d50 | yes |
+
+Function-level ABI: none of the 263 functions of these families (all present in the NVN2 GetProcAddress table) changed its argument count or argument types. Exactly two names are new: `nvnMultisampleStateSetCoverageTruncationEnable` / `GetCoverageTruncationEnable`. Behaviour changes that matter:
+- `nvnSamplerInitialize` writes **0x40** bytes (NVN1: 0x30). The host only writes its own 0x2c-byte record, so nothing breaks, but code that sizes samplers from nvn.h must use 0x40.
+- `nvnTextureBuilderSetPackagedTextureLayout` reads only the first **2 bytes** (12 bits) of the 8-byte layout.
+- Strides are 32-bit: `nvnTextureBuilderSetStride`/`GetStride`, `nvnTextureGetStride`, `nvnVertexStreamStateSetStride`/`GetStride` store and return 32 bits (`str w1` / `ldr w0`). The register ABI is unchanged, but the top 32 bits are dropped.
+- Flush/Invalidate of memory pools, buffers and texels are **no-ops** (sdk+0x5bd3c0 / 0x5bd3c4 are bare `ret`). `MemoryPoolFlushMappedRange` is MKW's most-called function of this family after GetFlags (92 call sites).
+- The texture flags kept by the texture are 16 bits wide. Two flag bits that NVN1 does not know are used: 0x800 and 0x1000 (see Textures).
+- The format enum adds 6 formats, 0x9d–0xa2 (format table has 0xa3 entries, see Textures).
+- Debug labels / debug IDs are stubs: every `*SetDebugLabel` is `ret`, every `*GetDebugID` returns 0.
+
+## Memory model (MemoryPool / MemoryPoolBuilder / NVX / ExternalMemoryPoolBuilder)
+
+### MemoryPoolBuilder layout (0x38 used, 0x40 reserved)
+
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x0 | u32 | unused (SetDefaults never writes it) | sdk+0x5bcdb0 |
+| +0x4 | u32 | flags (default 0x21 = CPU_NO_ACCESS\|GPU_CACHED) | SetDefaults/SetFlags/GetFlags sdk+0x5bcdb0/0x5bcea0/0x5bcee0 |
+| +0x8 | NVNdevice* | device | sdk+0x5bcda0, 0x5bceb0 |
+| +0x10 | void* | storage (CPU memory) | SetStorage sdk+0x5bcdd0 |
+| +0x18 | u64 | size | SetStorage |
+| +0x20 | u32 | NvRmMem handle to import (NVX); SetStorage clears it, SetNativeHandleNVX clears +0x10/+0x18 | sdk+0x5bcdd0, sdk+0x5bcde0 |
+| +0x28 | u64 | NVX "generic address" (fixed GPU VA); in reserved-list mode (flag 0x20000000): u32 count | sdk+0x5bce60; physical init sdk+0x5ccd38 |
+| +0x30 | u64 | NVX "special address" (fixed GPU VA of the compressible mapping); in reserved-list mode: pointer to an array of {u32 type; u64 gpuVa; u64 size} (0x18 bytes each) | sdk+0x5bce80; sdk+0x5ccd38 |
+
+### MemoryPool layout (0x100, zeroed by Initialize)
+
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x0 | u32 | implementation kind: 0 = normal/physical, 1 = virtual (flags VIRTUAL 0x200) | ctor sdk+0x5bd348 called by sdk+0x5cccf4 (0) / sdk+0x5cd518 (1); dispatchers sdk+0x5bd370/0x5bd3ac/0x5bd3c8/0x5bd3ec |
+| +0x8 | NVNdevice* | device | sdk+0x5bd348 |
+| +0x10 | u32 | normalised flags; bits 22–31 are driver-internal, hidden by GetFlags (& 0x3fffff) | sdk+0x5bd330 |
+| +0x18 | u64 | **generic GPU VA** (GetBufferAddress, GetGenericAddressNVX); for a virtual pool the VA-range base | sdk+0x5bd2a0, sdk+0x5cd254, sdk+0x5cd560 |
+| +0x20 | u64 | second generic-kind GPU VA, only when DeviceBuilder flag 0x10000 (device byte +0xa bit 0) is set or a reserved-list entry of type 5 exists; used instead of +0x18 for block-linear generic-kind textures | sdk+0x5cd254, sdk+0x5cca2c |
+| +0x28 | u64 | **special (compressible-kind) GPU VA**, only for COMPRESSIBLE pools (GetSpecialAddressNVX) | sdk+0x5cd254 (`flags byte < 0` branch), sdk+0x5bce90 |
+| +0x30 | void* | CPU address (= storage; or = +0x18 when the pool was imported from a handle) | sdk+0x5ccd38, sdk+0x5cd254 |
+| +0x38 | u64 | size | sdk+0x5bd320 |
+| +0x40..+0x57 | | zeroed by ctor, not used by the functions examined | sdk+0x5bd348 |
+| +0x58 | u32 | NvRmMem handle (GetNativeHandleNVX) | sdk+0x5bd340, sdk+0x5ccd38 |
+| +0x60 | ptr | normal: NvRmGpuMapping of +0x18; virtual: NvRmGpuAddressSpaceAllocation | sdk+0x5cd498, sdk+0x5cd560 |
+| +0x68 | ptr / u32,u32 | normal: mapping of +0x20; virtual: u32 page size (device+0xd4), u32 log2(page size) at +0x6c | same |
+| +0x70 | ptr / u32 | normal: mapping of +0x28; virtual: u32 remap batch size = min(GPU info +0xc0, 0x200) | same |
+| +0x74 | u8 | virtual: owns the VA allocation (0 when placed in a device reserved range) | sdk+0x5cd518, sdk+0x5cd560 |
+| +0x78 | u8 | normal: owns the NvRmMem handle (0 when imported) | sdk+0x5cd254, sdk+0x5cd498 |
+
+### Flags
+
+User-visible flags are the NVN1 values (`NVN_MEMORY_POOL_FLAGS_*`: CPU_NO_ACCESS 0x1, CPU_UNCACHED 0x2, CPU_CACHED 0x4, GPU_NO_ACCESS 0x8, GPU_UNCACHED 0x10, GPU_CACHED 0x20, SHADER_CODE 0x40, COMPRESSIBLE 0x80, PHYSICAL 0x100, VIRTUAL 0x200). Initialize (sdk+0x5bcef0) normalises bits 0–5 and keeps every bit from 6 up unchanged:
+- CPU access: UNCACHED if bit 0x2; else CACHED if bit 0x4; else NO_ACCESS if bit 0x1; else UNCACHED. If the result is UNCACHED and DeviceBuilder flag 0x8000 (device byte +0x9 bit 7) is set, CACHED is used instead. VIRTUAL forces CPU_NO_ACCESS.
+- GPU access: CACHED if 0x20; else UNCACHED if 0x10; else NO_ACCESS if 0x8; else CACHED. PHYSICAL forces GPU_NO_ACCESS.
+- GPU_CACHED becomes the "cacheable" attribute of every GPU mapping (`flags >> 5 & 1`, sdk+0x5ccbc0). CPU_UNCACHED selects NvRm coherency attribute 2, everything else 1 (sdk+0x5ccd38).
+- Bits above 0x3fffff are driver-internal (GetFlags masks them): **0x8000000** = a compressible texture has re-kinded part of the special mapping (set at sdk+0x5cca2c; E8 saw pool flags 0x080000a1); **0x10000000** = driver-owned pool (the device's internal 0x2000-byte pool, sdk+0x5b54e0); **0x20000000** = reserved-address-list mode (set on success at sdk+0x5ccd38 when the builder flags had it).
+- 0x400: used only by the driver's internal pool (flags 0x412 = CPU_UNCACHED\|GPU_UNCACHED\|0x400, sdk+0x5b54e0). No test of it was found in the pool code [open].
+- MKW's constant flags (SetFlags call sites): 0x21, 0x22 (texture/sampler descriptor memory, main+0xcee030), 0x24, 0x62, 0x64 (SHADER_CODE pools, main+0x9c5dac/0x9a7e10), **0xa1** (COMPRESSIBLE render-target pool, main+0x226dec4). Other sites pass a value computed by the game, masked with 0x0fffffff (main+0x248120).
+
+### How GPU addresses are assigned (answer: GPU VA == CPU VA for storage-backed pools)
+
+1. At device creation (sdk+0x5b44ac → sdk+0x5be8a8 → sdk+0x5be960) the driver opens the NvRm GPU, creates an address space covering VA [0x8000000, 0xC000000000) (constants at sdk data 0xac4f40). Unless DeviceBuilder flags bit 31 is set, it also **reserves a fixed allocation over [0x8000000, 0x8000000000)** (0x7ff8000000 / page-size pages, fixed address 0x8000000, constants at 0xac65c0), which is the whole 39-bit application CPU range. The allocation is stored at device+0x9f0. `nvnDeviceGetInteger(0x9a)` returns whether it exists (sdk+0x5b57c0). MKW passes DeviceBuilder flags 0 (main+0xcf3aa4), so the allocation exists. This matches E2 (AllocAsEx va_range 0x8000000..0xC000000000, "NVN then reserves 4 KiB VA fixed up to 512 GiB").
+2. Normal pool with storage (sdk+0x5ccd38 → sdk+0x5cd254 → sdk+0x5ccbc0): storage must be non-NULL and 4 KiB-aligned, size non-zero and a multiple of 4 KiB. PHYSICAL pools also need the size to be a multiple of device+0xd8 (= MEMORY_POOL_PAGE_SIZE, `GetInteger(0x3a)` returns device+0xd8). The storage is wrapped into an NvRmMem handle (`NvRmMemHandleAllocAttr`), then, unless PHYSICAL:
+   - the generic mapping is created **fixed at the CPU address inside the device+0x9f0 allocation** (`NvRmGpuMappingCreateFixed`) → **pool+0x18 == storage address**. Without that allocation it is placed freely (`NvRmGpuMappingCreate`), and GPU VA ≠ CPU VA.
+   - DeviceBuilder flag 0x10000 only: a second generic mapping at a free VA → +0x20.
+   - COMPRESSIBLE only: a second mapping with a compressible PTE kind at a **free GPU-only VA** (or at the NVX special address) → +0x28. E8 observed such a VA at 0x815f0d0000, above the CPU range.
+   - The size is rounded up to device+0xd4 (the big page) for the mappings.
+   - PHYSICAL pools get no GPU mapping at all: GetBufferAddress = 0.
+3. Pool from an NvRm handle (NVX SetNativeHandleNVX; memory = NULL, size = 0): the size comes from `NvRmMemGetSize`, the generic mapping is placed freely, and the CPU address is set to the GPU address and mapped there with `NvRmMemMap(handle, 0, size, 0x43)` (sdk+0x5cd254), so again CPU VA == GPU VA. The handle is not owned (not freed at Finalize).
+4. Virtual pool (VIRTUAL 0x200, sdk+0x5cd560): storage must be NULL, size non-zero and a multiple of device+0xd8. A GPU VA range of size >> log2(device+0xd4) pages is allocated (`NvRmGpuAddressSpaceAllocationCreate`, attribute word 1 = [INFERENCE] sparse) → +0x18. With device reserved ranges / NVX addresses it is placed at builder+0x28 (or the first reserved-list entry). The VA is GPU-only: E3/E8 saw gpu-214 sparse regions at 0x81_xxxx_xxxx. `Map` returns NULL (CPU_NO_ACCESS forced).
+5. Every pool is appended to the device pool list (device+0x968 pointer array, +0x970 count, +0x974 capacity 0x20, +0x978 grow step 0x20, +0x97c flags, +0x980 mutex; sdk+0x5bcef0, sdk+0x5bc310). The driver walks this list to translate GPU addresses to CPU pointers. Finalize removes the pool keeping the order (sdk+0x5bd190).
+
+**Consequence for nxnative:** keeping "GPU address = CPU address of the pool storage" (hle_nvn.c) matches the real driver for every storage-backed, non-virtual pool and for buffers (BufferGetAddress = pool+0x18 + offset). It does **not** hold for (a) virtual pools: their VAs lie outside the CPU range, so the host must hand out non-overlapping fake VAs (e.g. ≥ 0x8000000000) and keep them out of the CPU-pointer path; (b) compressible-kind textures: their texture address is pool+0x28 + offset, a second VA of the same memory. The host never needs to expose that one, because nvnTextureGetTextureAddress has no MKW call site.
+
+### Alignment and granularity
+
+| quantity | value / source |
+|---|---|
+| storage alignment / size granularity (normal pool) | 4 KiB / 4 KiB (`& 0xfff` checks, sdk+0x5ccd38) |
+| PHYSICAL and VIRTUAL size granularity, MapVirtual offset/size alignment | device+0xd8 = `GetInteger(NVN_DEVICE_INFO_MEMORY_POOL_PAGE_SIZE 0x3a)`, copied from NvRm GPU info +0x2c4 at device init (sdk+0x5bf090, which also copies info +0x2c0 → device+0xd4); the static default table gives 0x10000 (sdk+0x59bf50) [the runtime value was not observed] |
+| mapping granularity / big page | device+0xd4 (GPU info +0x2c0); virtual-pool remap unit; compressible-kind texture offset and size must be multiples of it |
+| texture storage alignment | see Textures |
+
+### MapVirtual and NVNmappingRequest
+
+NVNmappingRequest (0x28 bytes, same as NVN1's documented layout), from sdk+0x5cd730 and MKW's request at main+0x521640..0x521648 and main+0x5b5898..0x5b58a4:
+
+| offset | type | meaning |
+|---|---|---|
+| +0x0 | NVNmemoryPool* | physical pool (NULL = unmap the range) |
+| +0x8 | s64 | physical offset |
+| +0x10 | s64 | virtual offset (relative to the virtual pool's VA) |
+| +0x18 | u64 | size |
+| +0x20 | u32 | storage class: 0x100 = the device generic kind (device+0x1da0); otherwise `value & ~0x300` = PTE kind, and bit 0x200 is passed as an extra per-entry flag |
+
+Semantics (sdk+0x5bd2b0 → sdk+0x5cd730): global mutex; fails unless the pool is virtual; physical offset, virtual offset and size must all be multiples of device+0xd8, else false. Each request becomes one remap entry {handle (pool+0x58), kind, physical page = physOffset >> shift, virtual page = (poolVA + virtOffset) >> shift, page count, cacheable = virtual pool GPU_CACHED, flag 0x200}. A NULL pool gives an entry that only sets virtual page and count (unmapped). Entries go to `NvRmGpuAddressSpaceAllocationRemap` in batches of pool+0x70. Returns true when every batch succeeds. Finalize remaps the whole pool to unmapped. MKW builds the storage class from a table filled with `nvnTextureBuilderGetStorageClass` (call sites main+0x8f6290/0x8f630c/0x8f63b0) and uses MapVirtual at 13 sites (sparse texture arrays, cf. E8 "sparse regions").
+
+### FlushMappedRange / InvalidateMappedRange
+
+Both are **no-ops** in NVN2 (sdk+0x5bd280 → `ret`, sdk+0x5bd290 → `ret`). This holds for pools, buffers (sdk+0x59e2b0/0x59e2c0), texels (sdk+0x5cb860/0x5cb8f0) and the descriptor flushes in TexturePool/SamplerPool. Like the host, the driver assumes coherent CPU/GPU memory.
+
+### NVX extensions and ExternalMemoryPoolBuilder
+
+The NVX functions are not in the 698-name sorted table. `nvnDeviceGetProcAddress` reaches them through a strcmp fallback chain (sdk+0x5b5b40, [The driver's lookup](#the-drivers-lookup)). MKW's main references neither the NVX nor the External names (no strings, no imports).
+
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnMemoryPoolBuilderSetNativeHandleNVX` | sdk+0x5bcde0 | 0 | new (GetProcAddress fallback list sdk+0x5b5b40) | (builder, uint32_t nvrmHandle): +0x20 = handle and clears memory/size (+0x10/+0x18) → Initialize imports the handle |
+| `nvnMemoryPoolBuilderGetNativeHandleNVX` | sdk+0x5bcdf0 | 0 | new | returns u32 builder+0x20 |
+| `nvnMemoryPoolGetNativeHandleNVX` | sdk+0x5bd340 | 0 | new | returns u32 pool+0x58 (the NvRmMem handle of the pool, owned or imported) |
+| `nvnMemoryPoolBuilderGetReservedAddressesNVX` | sdk+0x5bce40 | 0 | new | (builder, uint64_t *generic, uint64_t *special): *generic = +0x28, *special = +0x30 |
+| `nvnMemoryPoolBuilderSetGenericAddressNVX` | sdk+0x5bce60 | 0 | new | builder+0x28 = fixed GPU VA for the generic mapping (used only when the device has reserved ranges, DeviceBuilderSetReservedAddressRangesNVX); see reserved-list mode |
+| `nvnMemoryPoolGetGenericAddressNVX` | sdk+0x5bce70 | 0 | new | returns pool+0x18 (same as GetBufferAddress) |
+| `nvnMemoryPoolBuilderSetSpecialAddressNVX` | sdk+0x5bce80 | 0 | new | builder+0x30 = fixed GPU VA for the compressible ("special") mapping |
+| `nvnMemoryPoolGetSpecialAddressNVX` | sdk+0x5bce90 | 0 | new | returns pool+0x28 (compressible-kind GPU VA, 0 if the pool is not COMPRESSIBLE) |
+
+Reserved-list mode [partly INFERENCE]: when builder flags bit 29 (0x20000000) is set, physical Initialize reads builder+0x28 as a u32 count and builder+0x30 as an array of {u32 type; u64 gpuVa; u64 size}. Type 1 creates the generic mapping fixed at gpuVa (→ +0x18), type 2 the compressible mapping (→ +0x28), type 5 the second generic mapping (→ +0x20); any other type fails. Each gpuVa must lie inside one of the device's reserved ranges (lookup sdk+0x5bdde0 over device+0x1d98). No public setter for the list exists other than reusing the Generic/Special address setters [INFERENCE: the C++ header provides an inline wrapper].
+
+ExternalMemoryPoolBuilder: plain C exports of the sdk (not via GetProcAddress), with C++ wrappers `nvn::ExternalMemoryPoolBuilder::*` at sdk+0x613794..0x613810 that call through PLT stubs. Layout: +0x0 NVNdevice*, +0x8 u32 `nn::gs::NativeMemoryHandle`.
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnExternalMemoryPoolBuilderSetDefaults` | sdk+0x612e30 | 0 | new (plain sdk export, not in GetProcAddress) | +0x8 = 0 (handle); device untouched |
+| `nvnExternalMemoryPoolBuilderSetDevice` | sdk+0x612e40 | 0 | new | +0x0 = device |
+| `nvnExternalMemoryPoolBuilderSetNativeMemoryHandle` | sdk+0x612e50 | 0 | new | (builder, nn::gs::NativeMemoryHandle (u32)) → +0x8 |
+| `nvnExternalMemoryPoolBuilderGetDevice` | sdk+0x612e60 | 0 | new | returns +0x0 |
+| `nvnExternalMemoryPoolBuilderGetNativeMemoryHandle` | sdk+0x612e70 | 0 | new | returns u32 +0x8 |
+
+No sdk function consumes an ExternalMemoryPoolBuilder: there is no `nvnMemoryPoolInitialize*External*` export, string or GetProcAddress entry. How a native memory handle turns into a pool is open. The likely route is NvRmMem id → `SetNativeHandleNVX` [INFERENCE] (cf. `nn::gs::sdk::QueryNativeMemoryNvsNvRmMemIdForDebug`, `NvRmMemGetNativeMemoryHandle` sdk+0x556490).
+
+### Function table: MemoryPoolBuilder
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnMemoryPoolBuilderSetStorage` | sdk+0x5bcdd0 | 18 | same | builder+0x10 = memory, +0x18 = size, and clears the NVX native handle (+0x20 = 0) |
+| `nvnMemoryPoolBuilderSetFlags` | sdk+0x5bcea0 | 17 | same | builder+0x4 = flags (u32, stored verbatim; normalisation happens in Initialize) |
+| `nvnMemoryPoolBuilderSetDefaults` | sdk+0x5bcdb0 | 15 | same | memory/size/native handle/generic/special address = 0 (+0x10..+0x38); flags (+0x4) = 0x21 (CPU_NO_ACCESS\|GPU_CACHED); device (+0x8) untouched |
+| `nvnMemoryPoolBuilderSetDevice` | sdk+0x5bcda0 | 10 | same | builder+0x8 = device |
+| `nvnMemoryPoolBuilderGetDevice` | sdk+0x5bceb0 | 0 | same (no NVN1 prototype) | returns builder+0x8 |
+| `nvnMemoryPoolBuilderGetFlags` | sdk+0x5bcee0 | 0 | same | returns builder+0x4 (unnormalised) |
+| `nvnMemoryPoolBuilderGetMemory` | sdk+0x5bcec0 | 0 | same (nvn.h declares a void return by mistake; it returns void*) | returns builder+0x10 |
+| `nvnMemoryPoolBuilderGetSize` | sdk+0x5bced0 | 0 | same | returns builder+0x18 |
+
+### Function table: MemoryPool
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnMemoryPoolGetFlags` | sdk+0x5bd330 | 198 | same | returns pool+0x10 & 0x3fffff (driver-internal bits 22..31 hidden) |
+| `nvnMemoryPoolFlushMappedRange` | sdk+0x5bd280 | 92 | same | **no-op** (tail-calls an empty function sdk+0x5bd3c0) |
+| `nvnMemoryPoolInitialize` | sdk+0x5bcef0 | 16 | same | zeroes 0x100 bytes, normalises flags, creates the NvRm memory handle and GPU mappings, adds the pool to the device pool list (device+0x968); returns false (and finalizes) on failure. See memory model |
+| `nvnMemoryPoolFinalize` | sdk+0x5bd190 | 15 | same | removes the pool from the device pool list, calls the interception hook (sdk+0x5cc960), then unmaps (virtual: remaps the whole range to unmapped and closes the VA allocation; normal: closes the 3 mappings, frees the NvRm handle if owned) |
+| `nvnMemoryPoolMapVirtual` | sdk+0x5bd2b0 | 13 | same (NVNmappingRequest layout = 0x28 bytes, see below) | under a global mutex (pointer at sdk+0xd7b040); only virtual pools (pool+0 == 1), else returns false; remaps each request through NvRmGpuAddressSpaceAllocationRemap in batches |
+| `nvnMemoryPoolMap` | sdk+0x5bd260 | 6 | same | returns pool+0x30 (CPU address) unless the normalised flags have CPU_NO_ACCESS (bit 0) → NULL |
+| `nvnMemoryPoolGetBufferAddress` | sdk+0x5bd2a0 | 4 | same | returns pool+0x18 (generic GPU VA) |
+| `nvnMemoryPoolInvalidateMappedRange` | sdk+0x5bd290 | 4 | same | **no-op** (tail-calls empty sdk+0x5bd3c4) |
+| `nvnMemoryPoolGetSize` | sdk+0x5bd320 | 1 | same | returns pool+0x38 |
+| `nvnMemoryPoolSetDebugLabel` | sdk+0x5b0b30 | 1 | same | **no-op** (ret) |
+
+### MKW call sequences (memory pools)
+- Generic pool (main+0x248114..0x2481a8, also main+0x2482f0, main+0x248444): `MemoryPoolBuilderSetDefaults(sp)` → `SetDevice(sp, dev)` → `SetFlags(sp, flags & 0x0fffffff)` → `SetStorage(sp, mem, size)` → `MemoryPoolInitialize(wrapper+0x40, sp)` (the wrapper is 0x190 bytes) → `MemoryPoolMap`.
+- Descriptor memory (main+0xcedfd8..0xcee0c8): size = round_up(texCount × texDescSize + sampCount × sampDescSize, 4 KiB); flags 0x22; storage from a 4 KiB-aligned allocator (main+0x5527b0); then SamplerPoolInitialize(obj+0xf0, pool, 0, sampCount) and TexturePoolInitialize(obj+0xd0, pool, sampCount × descSize, texCount).
+- Compressible render targets (main+0x226de94..0x226df74): size from TextureBuilderGetStorageSize/GetStorageAlignment, flags 0xa1, 4 KiB-aligned storage, `MemoryPoolInitialize`, then `TextureBuilderSetStorage(pool, 0)` and `TextureInitialize` at aligned offsets.
+- MapVirtual (main+0x52164c): one request {pool NULL, 0, virtual offset 0, size, storage class from a game table}. Unmap/reset of a sparse range. main+0x5b58a8: {physical pool, physical offset, virtual offset, size, class}.
+
+## Buffers
+
+### BufferBuilder (0x28 used; NVN1 reserves 0x40)
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x8 | NVNdevice* | device | sdk+0x59e170 |
+| +0x10 | NVNmemoryPool* | pool | sdk+0x59e190 |
+| +0x18 | s64 | offset | sdk+0x59e190 |
+| +0x20 | u64 | size | sdk+0x59e190 |
+
+### Buffer (0x30)
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x0 | — | zero | sdk+0x59e1e0 |
+| +0x8 | NVNdevice* | device | sdk+0x59e1e0 |
+| +0x10 | NVNmemoryPool* | pool | sdk+0x59e2d0 |
+| +0x18 | s64 | offset | sdk+0x59e2e0 |
+| +0x20 | u64 | size | sdk+0x59e2f0 |
+| +0x28 | — | zero | |
+
+GetAddress = pool+0x18 + offset; Map = pool+0x30 + offset unless the pool is CPU_NO_ACCESS or has no CPU address. A buffer cannot be built on a PHYSICAL pool. The driver creates no GPU object for a buffer (Finalize is `ret`).
+
+### Function table: BufferBuilder
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnBufferBuilderSetStorage` | sdk+0x59e190 | 30 | same | +0x10 pool, +0x18 offset, +0x20 size |
+| `nvnBufferBuilderSetDefaults` | sdk+0x59e180 | 29 | same | zeroes +0x10..+0x28 (pool, offset, size); device untouched |
+| `nvnBufferBuilderSetDevice` | sdk+0x59e170 | 20 | same | builder+0x8 = device |
+| `nvnBufferBuilderGetDevice` | sdk+0x59e1a0 | 0 | same (no NVN1 prototype) | returns +0x8 |
+| `nvnBufferBuilderGetMemoryOffset` | sdk+0x59e1c0 | 0 | same | returns +0x18 |
+| `nvnBufferBuilderGetMemoryPool` | sdk+0x59e1b0 | 0 | same (nvn.h says it returns NVNmemoryPool by value; it returns NVNmemoryPool*) | returns +0x10 |
+| `nvnBufferBuilderGetSize` | sdk+0x59e1d0 | 0 | same | returns +0x20 |
+
+### Function table: Buffer
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnBufferGetAddress` | sdk+0x59e2a0 | 147 | same | pool+0x18 (generic GPU VA) + offset |
+| `nvnBufferInitialize` | sdk+0x59e1e0 | 28 | same | zeroes 0x30 bytes; fails (returns false) if the pool is PHYSICAL (pool flags bit 8); copies device/pool/offset/size to +0x8/+0x10/+0x18/+0x20 |
+| `nvnBufferFinalize` | sdk+0x59e230 | 22 | same | **no-op** (ret) |
+| `nvnBufferMap` | sdk+0x59e270 | 5 | same | pool CPU address (pool+0x30) + offset, or NULL if the pool is CPU_NO_ACCESS or has no CPU address |
+| `nvnBufferFlushMappedRange` | sdk+0x59e2b0 | 3 | same | no-op (pool flush with offset+buffer offset) |
+| `nvnBufferInvalidateMappedRange` | sdk+0x59e2c0 | 2 | same | no-op |
+| `nvnBufferSetDebugLabel` | sdk+0x5b0b00 | 1 | same | **no-op** |
+| `nvnBufferGetDebugID` | sdk+0x59e300 | 0 | same | **stub: returns 0** |
+| `nvnBufferGetMemoryOffset` | sdk+0x59e2e0 | 0 | same | returns +0x18 |
+| `nvnBufferGetMemoryPool` | sdk+0x59e2d0 | 0 | same | returns +0x10 |
+| `nvnBufferGetSize` | sdk+0x59e2f0 | 0 | same | returns +0x20 |
+
+## Textures
+
+### TextureBuilder (0x68 used, 0x80 reserved by the game)
+| offset | type | meaning (default) | evidence |
+|---|---|---|---|
+| +0x0 | — | unused | |
+| +0x8 | NVNdevice* | device | sdk+0x5c8c50 |
+| +0x10 | NVNmemoryPool* | pool (NULL) | SetStorage sdk+0x5c8d70 |
+| +0x18 | s64 | offset (0); the texture keeps 48 bits | sdk+0x5c8d70, sdk+0x5cb990 |
+| +0x20 | u32 | flags (0) | sdk+0x5c8ca0 |
+| +0x24 | u32 | target (1 = 2D) | sdk+0x5c8cb0; default constant sdk data 0xac67b0 |
+| +0x28 / +0x2c / +0x30 | s32 | width / height / depth (0 / 0 / 0) | sdk+0x5c8cc0..0x5c8d10 |
+| +0x34 | s32 | levels (1) | sdk+0x5c8d20; default 0xac4740 |
+| +0x38 | s32 | format (0 = NONE) | sdk+0x5c8d30 |
+| +0x3c | s32 | samples (0) | sdk+0x5c8d40 |
+| +0x40..+0x4c | 4×u32 | swizzle r,g,b,a (2,3,4,5 = R,G,B,A) | sdk+0x5c8d50; defaults 0xac4740/0xac5840 |
+| +0x50 | u32 | depth-stencil mode (0 = DEPTH) | sdk+0x5c8d60 |
+| +0x54 | u16 | packaged layout: bits 0-3 "set" (1), bits 4-15 three 4-bit fields from the caller's layout (0) | sdk+0x5c9500, sdk+0x5c8e80 |
+| +0x58 | u32 | stride (0) | sdk+0x5c8d90 |
+| +0x5c | u32 | GL texture name (0) | sdk+0x5c8d80 |
+| +0x60 | const void* | packaged texture data (NULL); neither TextureInitialize nor the layout helper sdk+0x5c9800 reads it | sdk+0x5c9490 |
+
+### Texture (0x80)
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x0 | u64 | zero | sdk+0x5ca240 |
+| +0x8 | NVNdevice* | device | sdk+0x5ca240 |
+| +0x10 | NVNmemoryPool* | pool | sdk+0x5cb980 |
+| +0x18 | u64 | bits 0-47 pool offset, 48-55 levels (u8 @+0x1e), 56-63 samples (u8 @+0x1f) | sdk+0x5cb990, 0x5cac30, 0x5cac70 |
+| +0x20 | u32 | width | sdk+0x5cac00 |
+| +0x24 / +0x26 | u16 / u16 | height / depth (or layers) | sdk+0x5cac10 / 0x5cac20 |
+| +0x28 | u32 | bits 0-15 flags, 16-24 format (9 bits), 25-31 target (7 bits) | sdk+0x5cabc0/0x5cac40/0x5cabd0 |
+| +0x2c | u16 | swizzle r(0-2) g(3-5) b(6-8) a(9-11), depth-stencil mode (12-13), format has depth (14), has stencil (15) | sdk+0x5cac80, 0x5cacc0; Initialize |
+| +0x30..+0x47 | | zero (used only by the GL-interop path) | |
+| +0x48 | u8,u8,u48 | block width, block height, bits 16-63 = layer stride in bytes | layout helper sdk+0x5c9800; WriteTexels sdk+0x5cb2a0; FlushTexels sdk+0x5cb860 |
+| +0x50 | u32 | row stride (linear textures) | sdk+0x5cacf0, sdk+0x5c9800 |
+| +0x54 | u8 | bytes per block; +0x55 bits 0-6 log2(bytes per block); bits 16-26 of the u32 at +0x54 = sample-pattern code (0x48000 for 1 sample, 0x450000 for 2, 0x890000 for 4, 0x10a0000 for 8, 0x2120000 for 16), bits 27-31 = levels used by the layout | sdk+0x5c9800 |
+| +0x58 | u8 | layout byte from sdk+0x59c0ac [unknown] | sdk+0x5c9800 |
+| +0x59 | u8 | PTE kind (storage class low byte) | sdk+0x5cab00, sdk+0x5c9800 |
+| +0x5a | u48 | total storage size; GetStorageSize returns its low 32 bits | sdk+0x5cb9a0 |
+| +0x60 | u64 | texture GPU address | sdk+0x5cad00 |
+| +0x68 / +0x6c / +0x6e | u32 / u16 / u16 | layout width / height / depth-or-layers (cube = 6 per layer) | sdk+0x5c9800 |
+| +0x70..+0x72 | 3×u8 | block-linear block-size parameters (from the packaged layout or computed, sdk+0x59c154) [INFERENCE: log2 GOBs per block in z / x / y] | sdk+0x5c9800 |
+| +0x78 | u16 | slot in a device table for DEPTH32F / DEPTH32F_STENCIL8 textures (device+0x1e30, mutex device+0x1e48), 0xffff = none; released by Finalize | sdk+0x5ca240, sdk+0x5ca9c0 |
+
+Host check: `tex_t` (≤0x80) still fits. Note that `nvnTextureGetFlags` returns only 16 bits.
+
+### Texture flags (builder u32, texture keeps 16 bits)
+NVN1 values unchanged (DISPLAY 0x1, VIDEO_DECODE 0x2, IMAGE 0x4, COMPRESSIBLE 0x8, LINEAR 0x10, SPARSE 0x20, LINEAR_RENDER_TARGET 0x40, ADAPTIVE_ZCULL 0x80, DEPTH16_PREFER_FAST_CLEAR 0x100, MINIMAL_LAYOUT 0x200, ZCULL_SUPPORT_STENCIL 0x400 (tested in the zcull helper sdk+0x5c9c10)). Two new bits:
+- **0x800**: in the mip-chain computation (sdk+0x59c2e0) the next level becomes `1 + ((x−1) >> 1)` (round up) instead of `x >> 1`. It is also copied into texture-descriptor word 2 (bit 0x800 → descriptor bit 20, sdk+0x5cadb0) [INFERENCE: "round mip sizes up" layout flag].
+- **0x1000**: passed as a boolean to the PTE-kind chooser for colour formats only (sdk+0x5beddc arg 5 → `NvRmGpuDeviceChooseKind` attribute) [meaning unknown].
+
+### Storage size, alignment, class (MKW uses GetStorageSize ×8, GetStorageAlignment ×7, GetStorageClass ×3)
+- `GetStorageSize` (sdk+0x5c92e0): 0 when a GL name is set; otherwise the layout from sdk+0x5c9800 (Tegra block-linear: 64-byte × 8-row GOBs, per-level block heights, layer stride padded). Buffer target: width × bytes per pixel. LINEAR/LINEAR_RT: stride × height. Returns 0 for formats whose format-table caps bit 0 is clear.
+- `GetStorageAlignment` (sdk+0x5c8f10): start = 0x80 if LINEAR_RENDER_TARGET, else 0x20 if LINEAR, else 1; BUFFER target: max(that, bytes per pixel), with 4 for 12-byte formats; DISPLAY: max(that, `GetInteger(0xb0)`, 0x1000 in the static table). Block-linear: if the chosen kind ≠ device generic kind (compressible), raise to the big page device+0xd4. Finally a result of 1 becomes **0x200**. So: block-linear uncompressed 0x200, compressible big page.
+- Kind choice: LINEAR/LINEAR_RT/BUFFER → device generic kind (device+0x1da0, set to 6 at device init) [INFERENCE: 6 = generic 16Bx2]. Otherwise `NvRmGpuDeviceChooseKind(format hw word, samples, compressible, flag 0x1000)` (sdk+0x5beddc). "Compressible" = flag COMPRESSIBLE and device compression enabled (device byte +0x1da4). Depth/stencil formats also need device+0x1c24 ≠ 0x76165656; colour formats need block width ≤ 1 (no block-compressed formats) and device+0x1c20 ≠ 0x76165656 [INFERENCE: debug overrides that turn compression off].
+- `GetStorageClass` (sdk+0x5c9360 / texture sdk+0x5cab00): 0x100 when kind == generic kind; otherwise `0x100 | kind`, or `0x300 | kind` when DeviceBuilder flag 0x10000 is set and the texture is block-linear. MapVirtual decodes the same encoding (0x100 → generic, `& ~0x300` → kind, 0x200 → extra flag).
+- `GetRawStorageClass`: 1 for linear textures; else 2 for colour formats and DEPTH32F, 3 for STENCIL8/DEPTH16, 4 for DEPTH24/DEPTH24_STENCIL8, 5 for DEPTH32F_STENCIL8 (format jump table at sdk data 0xb7aa71; formats > 0x36 → 2).
+
+### Texture GPU address (TextureInitialize sdk+0x5ca240 → sdk+0x5bd3ac)
+- LINEAR / LINEAR_RT / BUFFER target, or any texture in a virtual pool: `pool+0x18 + offset` (sdk+0x5cd904 masks the offset to 48 bits).
+- Block-linear with the generic kind: `(pool+0x20 ? pool+0x20 : pool+0x18) + offset`. In MKW pool+0x20 is 0, so this is the CPU address of the storage.
+- Compressible kind: the pool must be COMPRESSIBLE; offset and size must be multiples of device+0xd4. The driver then calls `NvRmGpuMappingModify(pool+0x70 mapping, range, kind)` (E8: gpu sub-session 212 `NormalModifyMemoryKind4K`), sets pool flag 0x8000000, and the address is **`pool+0x28 + offset`** (the GPU-only compressible VA). Any failure makes Initialize return false. E8 confirms that without mapping-modify support the texture address stays 0.
+- Initialize also fails for a PHYSICAL pool, an unsupported format (caps bit 0), or COMPRESSIBLE on a pool that is neither COMPRESSIBLE nor VIRTUAL (`pool flags & 0x280`).
+
+### Texture and sampler descriptors (handles)
+- Descriptor size 0x20 for textures and for samplers (`GetInteger(0xf)` = `GetInteger(0x10)` = 0x20, static table sdk+0x59bf50). RegisterTexture/RegisterImage store at `CPU(pool) + poolOffset + id×0x20`, with id sign-extended (sdk+0x5cadb0/0x5caf40). Samplers likewise (sdk+0x5c67d0, `sbfiz #5`).
+- Reserved descriptors: `GetInteger(0x11)` = `GetInteger(0x12)` = 0x100 (static table). The driver itself writes only texture entry 0, a null descriptor (sdk+0x5cad10), and sampler entries 0, 1, 2 (three internal clamp-to-edge samplers, sdk+0x5c6690). MAX_TEXTURE_POOL_SIZE (0x24) = 0x100000, MAX_SAMPLER_POOL_SIZE (0x25) = 0x1000, MEMPOOL_TEXTURE_OBJECT_PAGE_ALIGNMENT (0x27) = 0x1000.
+- The texture descriptor is built by sdk+0x5fd0b0 (device, texture, view, out, isImage). Word 2 additionally receives texture flags COMPRESSIBLE → bit 18, SPARSE → bit 17, 0x800 → bit 20; the low 3 bits of the view's min layer → bits 29-31 (the rest in word 7, byte 3); bit 24 only when DeviceBuilder flag 0x10000 is set and the texture is block-linear and not a buffer; RegisterImage adds 0x80000. The hardware encoding is not needed by the host and was not decoded.
+
+### NVN2 format table and new formats
+The format table (sdk+0xd934b8, pointer at sdk+0xd7aff0) has 0x2c-byte entries indexed by NVNformat. Each entry holds caps flags (+0x0; bit 0 = supported), class (+0x4), block w/h (+0x8/+0x9), component bits (+0xa..+0xd), depth/stencil bits (+0xe/+0xf), bytes per block (+0x10), integer (+0x11), sRGB (+0x12), normalised (+0x13), and the hardware texture-format word (+0x24). It has **0xa3 entries**: values 0x00–0x9c match the NVN1 enum one-to-one (spot-checked by block size, bpp and sRGB for every DXT/RGTC/BPTC/ASTC/BGR entry). New:
+
+| value | block | bytes/block | sRGB | int | caps | class | hardware word (same as) |
+|---|---|---|---|---|---|---|---|
+| 0x9d | 4×4 | 8 | no | - | 0x51 | 0x1d | 0x78d24924 (RGB_DXT1, RGB_DXT1_SRGB) |
+| 0x9e | 4×4 | 16 | no | - | 0x51 | 0x1e | 0x58d24925 (RGBA_DXT3, RGBA_DXT3_SRGB) |
+| 0x9f | 4×4 | 8 | yes | - | 0x51 | 0x1d | 0x78d24924 (RGB_DXT1, RGB_DXT1_SRGB) |
+| 0xa0 | 4×4 | 16 | yes | - | 0x51 | 0x1e | 0x58d24925 (RGBA_DXT3, RGBA_DXT3_SRGB) |
+| 0xa1 | 1×1 | 8 | no | int | 0x19 | 0x4 | 0x60d36d84 (RG32I) |
+| 0xa2 | 1×1 | 8 | no | int | 0x19 | 0x4 | 0x60d49204 (RG32UI) |
+
+[INFERENCE] 0x9d–0xa0 reuse the BC1-RGB / BC2 hardware formats under a new class (0x1d/0x1e) and caps bit 0x40. 0xa1/0xa2 are 64-bit single-channel integer formats (signed/unsigned R64) sampled as RG32I/RG32UI. Their NVN names are not visible in the binary.
+
+### TextureView (0x10)
+| offset | type | meaning | evidence |
+|---|---|---|---|
+| +0x0 | s16 | min layer | sdk+0x5c95a0/0x5c9640 |
+| +0x2 | u16 | layer count | same |
+| +0x4 / +0x5 | u8 / u8 | base level / level count | sdk+0x5c9570/0x5c9620 |
+| +0x6 | u8 | target | sdk+0x5c92c0/0x5c96d0 |
+| +0x7 | bits | bit 56 levels set, 57 layers set, 58 format set, 59 swizzle set, 60 depth-stencil mode set, 61 target set, 62-63 depth-stencil mode | setters above, sdk+0x5c9600 |
+| +0x8 | u32 | format | sdk+0x5c95c0 |
+| +0xc..+0xf | 4×u8 | swizzle r,g,b,a | sdk+0x5c95e0 |
+
+The level and layer counts are stored as u8 / u16. Getters return the "set" bit as NVNboolean.
+
+### MKW call sequences (textures)
+- main+0x130374..0x1303ac: `TextureBuilderGetStorageSize` → `memset(texture, 0, 0x80)` → `TextureInitialize`.
+- main+0x2625fc..: for up to 4 builders (stack array, stride 0x80): GetStorageAlignment / GetStorageSize → SetStorage(pool, aligned offset) → TextureInitialize. main+0xe2b940..0xe2ba08: the same over an array of builders with stride 0x80.
+- main+0x226df14..: compressible render-target pool, described above.
+- main+0x524514..0x52453c: TextureFinalize then TextureInitialize of the same object (re-create in place).
+
+### Function table: TextureBuilder
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnTextureBuilderSetDevice` | sdk+0x5c8c50 | 13 | same | +0x8 = device |
+| `nvnTextureBuilderSetDefaults` | sdk+0x5c8c60 | 10 | same | +0x10/+0x18 pool/offset = 0, flags 0, target 2D(1), width/height/depth 0, levels 1, format NONE(0), samples 0, swizzle R,G,B,A (2,3,4,5), depth-stencil mode DEPTH(0), packaged layout +0x54 = 0, stride/GL name/packaged data (+0x58..+0x68) = 0; device untouched |
+| `nvnTextureBuilderSetFormat` | sdk+0x5c8d30 | 10 | same | +0x38 |
+| `nvnTextureBuilderSetTarget` | sdk+0x5c8cb0 | 10 | same | +0x24 |
+| `nvnTextureBuilderGetStorageSize` | sdk+0x5c92e0 | 8 | same | 0 if a GL name is set; else computes the layout (sdk+0x5c9800) and returns the total size in bytes (0 for formats whose caps bit 0 is clear = unsupported) |
+| `nvnTextureBuilderSetFlags` | sdk+0x5c8ca0 | 8 | same | +0x20 = flags (u32 here, but the texture keeps only 16 bits) |
+| `nvnTextureBuilderSetStorage` | sdk+0x5c8d70 | 8 | same | +0x10 pool, +0x18 offset |
+| `nvnTextureBuilderGetStorageAlignment` | sdk+0x5c8f10 | 7 | same | see Textures: 0x200 for block-linear generic kind, big-page size (device+0xd4) for compressible kinds, 0x20 LINEAR, 0x80 LINEAR_RENDER_TARGET, bpp for buffer textures, raised to GetInteger(0xb0) for DISPLAY |
+| `nvnTextureBuilderSetLevels` | sdk+0x5c8d20 | 6 | same | +0x34 |
+| `nvnTextureBuilderSetSwizzle` | sdk+0x5c8d50 | 6 | same | +0x40/+0x44/+0x48/+0x4c (r,g,b,a, u32 each) |
+| `nvnTextureBuilderSetSamples` | sdk+0x5c8d40 | 5 | same | +0x3c |
+| `nvnTextureBuilderSetSize2D` | sdk+0x5c8d00 | 5 | same | +0x28 = w, +0x2c = h, depth = 1 |
+| `nvnTextureBuilderSetWidth` | sdk+0x5c8cc0 | 5 | same | +0x28 |
+| `nvnTextureBuilderSetDepth` | sdk+0x5c8ce0 | 4 | same | +0x30 |
+| `nvnTextureBuilderSetDepthStencilMode` | sdk+0x5c8d60 | 4 | same | +0x50 |
+| `nvnTextureBuilderSetHeight` | sdk+0x5c8cd0 | 4 | same | +0x2c |
+| `nvnTextureBuilderGetStorageClass` | sdk+0x5c9360 | 3 | same | 0x100 if the chosen PTE kind equals the device generic kind (device+0x1da0); else kind \| 0x100, or kind \| 0x300 when DeviceBuilder flag 0x10000 and the texture is block-linear |
+| `nvnTextureBuilderGetZCullStorageSize` | sdk+0x5caa30 | 2 | same | ZCull save/restore size from the zcull helper sdk+0x5c9c10 (0 if not supported) |
+| `nvnTextureBuilderSetPackagedTextureLayout` | sdk+0x5c9500 | 2 | **differs**: reads only the first 16 bits of the 8-byte NVNpackagedTextureLayout | +0x54 (u16): bits 0-3 = 1 ("layout given"), bits 4-15 = the low 12 bits of the layout's first u16 (three 4-bit fields copied into the texture layout at +0x29/+0x2a/+0x28 of the layout block) |
+| `nvnTextureBuilderSetStride` | sdk+0x5c8d90 | 2 | register ABI same; **stored as 32 bits** (str w1) although nvn.h says ptrdiff_t | +0x58 (u32) |
+| `nvnTextureBuilderGetFlags` | sdk+0x5c8db0 | 1 | same | +0x20 |
+| `nvnTextureBuilderGetDepth` | sdk+0x5c8df0 | 0 | same | +0x30 |
+| `nvnTextureBuilderGetDepthStencilMode` | sdk+0x5c8e60 | 0 | same | +0x50 |
+| `nvnTextureBuilderGetDevice` | sdk+0x5c8da0 | 0 | same (no NVN1 prototype) | +0x8 |
+| `nvnTextureBuilderGetFormat` | sdk+0x5c8e10 | 0 | same | +0x38 |
+| `nvnTextureBuilderGetGLTextureName` | sdk+0x5c9480 | 0 | same | +0x5c |
+| `nvnTextureBuilderGetHeight` | sdk+0x5c8de0 | 0 | same | +0x2c |
+| `nvnTextureBuilderGetLevels` | sdk+0x5c8e00 | 0 | same | +0x34 |
+| `nvnTextureBuilderGetMemoryOffset` | sdk+0x5c8f00 | 0 | same | +0x18 |
+| `nvnTextureBuilderGetMemoryPool` | sdk+0x5c8ef0 | 0 | same (nvn.h: returns NVNmemoryPool by value; it is a pointer) | +0x10 |
+| `nvnTextureBuilderGetPackagedTextureData` | sdk+0x5c8e70 | 0 | same | +0x60 |
+| `nvnTextureBuilderGetPackagedTextureLayout` | sdk+0x5c8e80 | 0 | same (no NVN1 prototype; (const builder*, NVNpackagedTextureLayout*) → NVNboolean) | writes the 12 stored bits back as a u32 into *out (rest zeroed) and returns +0x54 & 0xf ("set") |
+| `nvnTextureBuilderGetRawStorageClass` | sdk+0x5c94a0 | 0 | same (no NVN1 prototype; returns int) | format category: 1 linear/linear-RT; 2 colour (and DEPTH32F); 3 STENCIL8/DEPTH16; 4 DEPTH24/DEPTH24_STENCIL8; 5 DEPTH32F_STENCIL8; 2 for every format > 0x36; NONE → 0 |
+| `nvnTextureBuilderGetSamples` | sdk+0x5c8e20 | 0 | same | +0x3c |
+| `nvnTextureBuilderGetSparseTileLayout` | sdk+0x5cb100 | 0 | same | fills NVNtextureSparseTileLayout {numTiledLevels, tileW, tileH, tileD} for 64 KiB tiles; all zero unless flags has SPARSE (0x20) and the texture is not 1D/1D-array/buffer, not VIDEO_DECODE/LINEAR, not a 12-byte format |
+| `nvnTextureBuilderGetStride` | sdk+0x5c8ee0 | 0 | returns 32 bits (ldr w0) — zero-extended ptrdiff_t | +0x58 |
+| `nvnTextureBuilderGetSwizzle` | sdk+0x5c8e30 | 0 | same | +0x40..+0x4c |
+| `nvnTextureBuilderGetTarget` | sdk+0x5c8dc0 | 0 | same | +0x24 |
+| `nvnTextureBuilderGetViewOffset` | sdk+0x5c90b0 | 0 | same name, no NVN1 prototype: (const NVNtextureBuilder*, const NVNtextureView*) → ptrdiff_t | byte offset of the view's first level/layer from the texture start, computed from the builder |
+| `nvnTextureBuilderGetWidth` | sdk+0x5c8dd0 | 0 | same | +0x28 |
+| `nvnTextureBuilderSetGLTextureName` | sdk+0x5c8d80 | 0 | same | +0x5c; a non-zero name makes GetStorageSize return 0 and Initialize take the GL-interop path |
+| `nvnTextureBuilderSetPackagedTextureData` | sdk+0x5c9490 | 0 | same | +0x60 |
+| `nvnTextureBuilderSetSize1D` | sdk+0x5c8cf0 | 0 | same | +0x28 = w, height = depth = 1 |
+| `nvnTextureBuilderSetSize3D` | sdk+0x5c8d10 | 0 | same | +0x28/+0x2c/+0x30 |
+
+### Function table: Texture
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnTextureGetFlags` | sdk+0x5cabc0 | 9 | same | sign-extended 16 bits of +0x28 |
+| `nvnTextureInitialize` | sdk+0x5ca240 | 7 | same | zeroes 0x80 bytes, sets +0x78 = 0xffff, packs the builder (see layout), computes the layout, picks the PTE kind and GPU address (+0x60); fails if: pool PHYSICAL, unsupported format, COMPRESSIBLE flag on a pool that is neither COMPRESSIBLE nor VIRTUAL, non-generic kind not big-page aligned, or mapping-modify fails. DEPTH32F/DEPTH32F_STENCIL8 textures take a slot in a device table (device+0x1e30, mutex +0x1e48) stored at +0x78 |
+| `nvnTextureFinalize` | sdk+0x5ca9c0 | 5 | same | releases the +0x78 device slot if any; nothing else (no GPU unmapping) |
+| `nvnTextureGetHeight` | sdk+0x5cac10 | 5 | same | u16 +0x24 |
+| `nvnTextureGetTarget` | sdk+0x5cabd0 | 5 | same | bits 25-31 of +0x28 |
+| `nvnTextureGetDepth` | sdk+0x5cac20 | 3 | same | u16 +0x26 |
+| `nvnTextureGetFormat` | sdk+0x5cac40 | 3 | same | bits 16-24 of +0x28 |
+| `nvnTextureGetWidth` | sdk+0x5cac00 | 3 | same | u32 +0x20 |
+| `nvnTextureGetLevels` | sdk+0x5cac30 | 2 | same | u8 +0x1e |
+| `nvnTextureGetSamples` | sdk+0x5cac70 | 2 | same | u8 +0x1f |
+| `nvnTextureGetSwizzle` | sdk+0x5cac80 | 2 | same | 3-bit fields of u16 +0x2c |
+| `nvnTextureFlushTexels` | sdk+0x5cb860 | 1 | same | computes the byte range of the view layers and calls pool flush = **no-op** |
+| `nvnTextureGetMemoryOffset` | sdk+0x5cb990 | 1 | same | +0x18 & 0xffffffffffff (48-bit) |
+| `nvnTextureGetMemoryPool` | sdk+0x5cb980 | 1 | same | +0x10 |
+| `nvnTextureSetDebugLabel` | sdk+0x5b0b80 | 1 | same | **no-op** |
+| `nvnTextureWriteTexels` | sdk+0x5cb570 | 1 | same | = WriteTexelsStrided(…, 0, 0) |
+| `nvnTextureCompare` | sdk+0x5cb9b0 | 0 | same | true if device, pool, 48-bit offset, flags, target, format, sizes, ... are equal |
+| `nvnTextureGetDebugID` | sdk+0x5cbb30 | 0 | same | **stub: returns 0** |
+| `nvnTextureGetDepthStencilMode` | sdk+0x5cacc0 | 0 | same | bits 12-13 of u16 +0x2c |
+| `nvnTextureGetRawStorageClass` | sdk+0x5cbb40 | 0 | same (no NVN1 prototype) | 1 if LINEAR/LINEAR_RT, else per-format category (as builder) |
+| `nvnTextureGetSparseTileLayout` | sdk+0x5cb1b0 | 0 | same | as the builder version, from the stored texture |
+| `nvnTextureGetStorageClass` | sdk+0x5cab00 | 0 | same | same rule as the builder getter, from the stored kind byte +0x59 |
+| `nvnTextureGetStorageSize` | sdk+0x5cb9a0 | 0 | same (int) | u32 at +0x5a (unaligned) |
+| `nvnTextureGetStride` | sdk+0x5cacf0 | 0 | returns 32 bits | u32 +0x50 |
+| `nvnTextureGetTextureAddress` | sdk+0x5cad00 | 0 | same | u64 +0x60 (GPU VA chosen at Initialize) |
+| `nvnTextureGetViewOffset` | sdk+0x5cab70 | 0 | same | (view first level/layer GPU address via sdk+0x5c9dec) − texture address |
+| `nvnTextureGetZCullStorageSize` | sdk+0x5caa80 | 0 | same | ZCull size from the texture fields |
+| `nvnTextureInvalidateTexels` | sdk+0x5cb8f0 | 0 | same | same range computation, pool invalidate = **no-op** |
+| `nvnTextureReadTexels` | sdk+0x5cb850 | 0 | same | = ReadTexelsStrided(…, 0, 0) |
+| `nvnTextureReadTexelsStrided` | sdk+0x5cb580 | 0 | same | CPU de-swizzle copy from the pool CPU mapping |
+| `nvnTextureWriteTexelsStrided` | sdk+0x5cb2a0 | 0 | same | CPU copy into the pool CPU mapping with the block-linear (64-byte×8-row GOB) swizzle; region/view/strides as NVN1 |
+
+### Function table: TextureView
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnTextureViewSetDefaults` | sdk+0x5c9560 | 49 | same (struct now 16 bytes) | zeroes 16 bytes |
+| `nvnTextureViewSetLevels` | sdk+0x5c9570 | 32 | same | byte 4 = base level, byte 5 = level count, bit 56 set |
+| `nvnTextureViewSetLayers` | sdk+0x5c95a0 | 22 | same | u16 0 = min layer, u16 2 = layer count, bit 57 set |
+| `nvnTextureViewSetSwizzle` | sdk+0x5c95e0 | 20 | same | bytes +0xc..+0xf = r,g,b,a, bit 59 set |
+| `nvnTextureViewSetTarget` | sdk+0x5c92c0 | 5 | same | byte 6 = target, bit 61 set |
+| `nvnTextureViewSetFormat` | sdk+0x5c95c0 | 2 | same | u32 +8 = format, bit 58 set |
+| `nvnTextureViewGetLayers` | sdk+0x5c9640 | 1 | same | outputs u16 0 / u16 2, returns bit 57 |
+| `nvnTextureViewGetLevels` | sdk+0x5c9620 | 1 | same | outputs bytes 4/5, returns bit 56 |
+| `nvnTextureViewGetTarget` | sdk+0x5c96d0 | 1 | same | outputs byte 6, returns bit 61 |
+| `nvnTextureViewSetDepthStencilMode` | sdk+0x5c9600 | 1 | same | bits 62-63 = mode, bit 60 set |
+| `nvnTextureViewCompare` | sdk+0x5c96f0 | 0 | same | compares set-bits and the fields that are set |
+| `nvnTextureViewGetDepthStencilMode` | sdk+0x5c96b0 | 0 | same | outputs bits 62-63, returns bit 60 |
+| `nvnTextureViewGetFormat` | sdk+0x5c9660 | 0 | same | outputs +8, returns bit 58 |
+| `nvnTextureViewGetSwizzle` | sdk+0x5c9680 | 0 | same | outputs +0xc..+0xf, returns bit 59 |
+
+## Texture and sampler pools
+
+TexturePool / SamplerPool (0x20 each): +0x0 `const NVNmemoryPool*`, +0x8 s64 offset, +0x10 s32 descriptor count, +0x18 u64 zero (sdk+0x5cad10, sdk+0x5c6690). Initialize writes descriptors through the pool's CPU mapping: entry 0 of a texture pool, entries 0–2 of a sampler pool. A CPU_NO_ACCESS pool has no CPU pointer, so the write would go to address 0 + offset [INFERENCE: callers must use CPU-visible descriptor memory; MKW uses flags 0x22].
+
+### Function table: TexturePool
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnTexturePoolInitialize` | sdk+0x5cad10 | 1 | same | +0 pool, +8 offset, +0x10 count, +0x18 = 0; writes a null descriptor (0x20 bytes: u32 0x24900, 0, 0x600000, 0…) at entry 0 through the pool CPU mapping; always returns true |
+| `nvnTexturePoolRegisterTexture` | sdk+0x5cadb0 | 1 | same | encodes the 0x20-byte texture descriptor (sdk+0x5fd0b0, image=0) and stores it at CPU(pool)+offset+id*0x20 (id sign-extended) |
+| `nvnTexturePoolFinalize` | sdk+0x5cada0 | 0 | same | **no-op** |
+| `nvnTexturePoolGetMemoryOffset` | sdk+0x5cb0e0 | 0 | same | +8 |
+| `nvnTexturePoolGetMemoryPool` | sdk+0x5cb0d0 | 0 | same | +0 |
+| `nvnTexturePoolGetSize` | sdk+0x5cb0f0 | 0 | same | +0x10 |
+| `nvnTexturePoolRegisterImage` | sdk+0x5caf40 | 0 | same | same with image=1 and bit 0x80000 set in descriptor word 2 |
+| `nvnTexturePoolSetDebugLabel` | sdk+0x5b0ba0 | 0 | same | **no-op** |
+
+### Function table: SamplerPool
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnSamplerPoolInitialize` | sdk+0x5c6690 | 1 | same | +0 pool, +8 offset, +0x10 count, +0x18 = 0; writes three driver samplers at ids 0,1,2 (all CLAMP_TO_EDGE, LOD 0..1000; 0: linear aniso 1; 1: linear aniso 2.0; 2: nearest aniso 2.0); returns true |
+| `nvnSamplerPoolRegisterSampler` | sdk+0x5c67a0 | 1 | same | encodes from sampler+8 (the builder copy) via sdk+0x5c67d0 into CPU(pool)+offset+id*0x20 |
+| `nvnSamplerPoolFinalize` | sdk+0x5c67b0 | 0 | same | **no-op** |
+| `nvnSamplerPoolGetMemoryOffset` | sdk+0x5c68c0 | 0 | same | +8 |
+| `nvnSamplerPoolGetMemoryPool` | sdk+0x5c68b0 | 0 | same | +0 |
+| `nvnSamplerPoolGetSize` | sdk+0x5c68d0 | 0 | same | +0x10 |
+| `nvnSamplerPoolRegisterSamplerBuilder` | sdk+0x5c67c0 | 0 | same | same, directly from the builder |
+| `nvnSamplerPoolSetDebugLabel` | sdk+0x5b0bb0 | 0 | same | **no-op** |
+
+## Samplers
+
+### SamplerBuilder (0x30 used; game reserves 0x40; NVN1 header 0x60)
+| offset | type | meaning (default) | evidence |
+|---|---|---|---|
+| +0x0 | NVNdevice* | device | sdk+0x5c6210 |
+| +0x8 / +0xc | f32 / f32 | LOD clamp min / max (0.0 / 1000.0) | sdk+0x5c6290; defaults sdk data 0xac6cb0 |
+| +0x10 | f32 | LOD bias (0) | sdk+0x5c62a0 |
+| +0x14 | f32 | max anisotropy (1.0) | sdk+0x5c6360 |
+| +0x18 | f32 | LOD snap (0) | sdk+0x5c6380 |
+| +0x1c..+0x28 | 4×u32 | border colour (float / int / uint share storage) (0) | sdk+0x5c62d0..0x5c6330 |
+| +0x2c | u32 | packed: wrap S 0-3, T 4-7, R 8-11, reduction 12-15, min filter 16-19, mag filter 20-23, compare mode 24-25, compare func 26-31. Default 0x08110111 = REPEAT ×3, AVERAGE, LINEAR, LINEAR, NONE, LESS | sdk+0x5c6220..0x5c6370 |
+
+No new sampler fields relative to NVN1's API (reduction, LOD snap and border colours already existed). The getters sign-extend the packed fields (`sbfx`), so a 4-bit field reads back correctly only for values ≤ 7. Every NVN wrap/filter/reduction enum fits, and the compare function has 6 bits.
+
+### Sampler (0x40, grew from 0x30)
++0x0 zero; +0x8..+0x38 = copy of builder bytes 0..0x30 (device at +0x8, LOD min/max +0x10/+0x14, bias +0x18, aniso +0x1c, LOD snap +0x20, border +0x24..+0x30, packed +0x34); +0x38..+0x40 zero (sdk+0x5c6500 and the getters sdk+0x5c6540..0x5c6680). RegisterSampler encodes from sampler+0x8, so a sampler is a builder snapshot.
+
+MKW (main+0xcee0e4..0xcee144): SamplerBuilderSetDefaults → SetMinMagFilter(LINEAR_MIPMAP_NEAREST, LINEAR) → SetDevice → SamplerInitialize(obj+0x110). main+0x9a7cb0..: wrap CLAMP_TO_EDGE ×3, aniso 1.0, compare (NONE, ALWAYS), then SamplerInitialize into an array.
+
+### Function table: SamplerBuilder
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnSamplerBuilderSetDefaults` | sdk+0x5c6220 | 4 | same | LOD min 0, max 1000.0, bias 0, max aniso 1.0, LOD snap 0, border 0,0,0,0, packed +0x2c = 0x08110111 (wrap S/T/R REPEAT, reduction AVERAGE, min LINEAR, mag LINEAR, compare NONE, func LESS); device untouched |
+| `nvnSamplerBuilderSetMinMagFilter` | sdk+0x5c6250 | 4 | same | byte +0x2e = min \| mag<<4 (bits 16-23 of the packed word) |
+| `nvnSamplerBuilderSetDevice` | sdk+0x5c6210 | 3 | same | +0 |
+| `nvnSamplerBuilderSetMaxAnisotropy` | sdk+0x5c6360 | 3 | same | +0x14 |
+| `nvnSamplerBuilderSetCompare` | sdk+0x5c62b0 | 2 | same | packed bits 24-25 mode, 26-31 func |
+| `nvnSamplerBuilderSetLodBias` | sdk+0x5c62a0 | 2 | same | +0x10 |
+| `nvnSamplerBuilderSetLodClamp` | sdk+0x5c6290 | 2 | same | +0x8 min, +0xc max (float) |
+| `nvnSamplerBuilderSetWrapMode` | sdk+0x5c6270 | 2 | same | packed bits 0-3 / 4-7 / 8-11 |
+| `nvnSamplerBuilderSetBorderColor` | sdk+0x5c62d0 | 1 | same | +0x1c..+0x28 (4 floats) |
+| `nvnSamplerBuilderSetReductionFilter` | sdk+0x5c6370 | 1 | same | packed bits 12-15 |
+| `nvnSamplerBuilderGetBorderColor` | sdk+0x5c6440 | 0 | same | +0x1c.. |
+| `nvnSamplerBuilderGetBorderColori` | sdk+0x5c6470 | 0 | same | +0x1c.. |
+| `nvnSamplerBuilderGetBorderColorui` | sdk+0x5c64a0 | 0 | same | +0x1c.. |
+| `nvnSamplerBuilderGetCompare` | sdk+0x5c6420 | 0 | same | packed bits 24-25 / 26-31 |
+| `nvnSamplerBuilderGetDevice` | sdk+0x5c6390 | 0 | same (no NVN1 prototype) | +0 |
+| `nvnSamplerBuilderGetLodBias` | sdk+0x5c6410 | 0 | same | +0x10 |
+| `nvnSamplerBuilderGetLodClamp` | sdk+0x5c63f0 | 0 | same | +0x8 / +0xc |
+| `nvnSamplerBuilderGetLodSnap` | sdk+0x5c64f0 | 0 | same | +0x18 |
+| `nvnSamplerBuilderGetMaxAnisotropy` | sdk+0x5c64d0 | 0 | same | +0x14 |
+| `nvnSamplerBuilderGetMinMagFilter` | sdk+0x5c63a0 | 0 | same | packed bits 16-19 / 20-23 |
+| `nvnSamplerBuilderGetReductionFilter` | sdk+0x5c64e0 | 0 | same | packed bits 12-15 |
+| `nvnSamplerBuilderGetWrapMode` | sdk+0x5c63c0 | 0 | same | packed nibbles 0..2 |
+| `nvnSamplerBuilderSetBorderColori` | sdk+0x5c6300 | 0 | same | same storage, raw ints |
+| `nvnSamplerBuilderSetBorderColorui` | sdk+0x5c6330 | 0 | same | same storage, raw uints |
+| `nvnSamplerBuilderSetLodSnap` | sdk+0x5c6380 | 0 | same | +0x18 |
+
+### Function table: Sampler
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnSamplerInitialize` | sdk+0x5c6500 | 4 | same, **object grew to 0x40** | zeroes 0x40 bytes and copies builder bytes 0..0x30 to sampler+0x8..+0x38; returns true |
+| `nvnSamplerFinalize` | sdk+0x5c6530 | 3 | same | **no-op** |
+| `nvnSamplerGetCompare` | sdk+0x5c65c0 | 1 | same | +0x34 bits 24-31 |
+| `nvnSamplerGetLodBias` | sdk+0x5c65b0 | 1 | same | +0x18 |
+| `nvnSamplerGetMaxAnisotropy` | sdk+0x5c6670 | 1 | same | +0x1c |
+| `nvnSamplerGetMinMagFilter` | sdk+0x5c6540 | 1 | same | packed word +0x34 |
+| `nvnSamplerSetDebugLabel` | sdk+0x5b0b60 | 1 | same | **no-op** |
+| `nvnSamplerCompare` | sdk+0x5c68e0 | 0 | same | device, wrap/filter bits, LOD clamp, bias, border, aniso, reduction |
+| `nvnSamplerGetBorderColor` | sdk+0x5c65e0 | 0 | same | +0x24..+0x30 |
+| `nvnSamplerGetBorderColori` | sdk+0x5c6610 | 0 | same | +0x24.. |
+| `nvnSamplerGetBorderColorui` | sdk+0x5c6640 | 0 | same | +0x24.. |
+| `nvnSamplerGetDebugID` | sdk+0x5c6990 | 0 | same | **stub: returns 0** |
+| `nvnSamplerGetLodClamp` | sdk+0x5c6590 | 0 | same | +0x10 / +0x14 |
+| `nvnSamplerGetReductionFilter` | sdk+0x5c6680 | 0 | same | +0x34 bits 12-15 |
+| `nvnSamplerGetWrapMode` | sdk+0x5c6560 | 0 | same | +0x34 |
+
+## State objects
+
+All are plain bit-packed values that the game copies by value. The driver reads them at bind time. Layouts (driver bit positions) and SetDefaults values:
+
+### BlendState (8 bytes)
+word0 (+0): bits 0-2 blend target, 8-13 advanced mode, 16-17 advanced overlap, 18 advanced premultiplied src, 19 advanced normalized dst, 24-26 RGB equation, 28-30 alpha equation. word1 (+4): src RGB 0-6, dst RGB 8-14, src alpha 16-22, dst alpha 24-30.
+Default (sdk+0x5c69a0): `0x01020102_110c0000` = target 0, advanced mode NONE, overlap UNCORRELATED, premultiplied src **true**, normalized dst **true**, equations ADD/ADD, funcs ONE/ZERO/ONE/ZERO.
+
+### ChannelMaskState (4 bytes)
+4 bits per colour target at bit 4×i (r=1, g=2, b=4, a=8). Default 0xffffffff (sdk+0x5c6b80).
+
+### ColorState (4 bytes)
+byte 1 = blend enable per target (bit i), byte 2 = logic op, bits 24-27 = alpha-test function; byte 0 unused. Default 0x08030000 = no blending, COPY, ALWAYS (sdk+0x5c6c10).
+
+### DepthStencilState (8 bytes)
+word0: bit 0 depth test, bit 1 depth write, bit 2 stencil test, bits 4-7 depth func. word1: front stencil func 0-3, fail 4-7, depth-pass 8-11, depth-fail 12-15; back stencil func 16-19, fail 20-23, depth-pass 24-27, depth-fail 28-31. Face argument: bit 0 front, bit 1 back; getters use back only for face == BACK (2).
+Default (sdk+0x5c6da0): `0x11181118_00000022` = depth test off, **depth write on**, stencil off, LESS; stencil ALWAYS, KEEP/KEEP/KEEP on both faces.
+
+### MultisampleState (0x18 bytes)
+word0: bit 0 multisample enable, 1 alpha-to-coverage, 2 alpha-to-coverage dither, 3 sample-locations enable, 4 sample-locations grid enable, **5 coverage truncation (new)**, bits 8-12 samples, 13-14 coverage modulation mode, 15-19 raster samples, 20 coverage-to-colour enable, 21-23 coverage-to-colour output. Bytes +4..+0x13: programmable sample locations, one byte per sample, x and y as 4-bit fixed point [INFERENCE from the 0x88 default = (0.5, 0.5); SetSampleLocations clamps each float to [0,1] first]. +0x14 u32 zero.
+Default (sdk+0x5c7050): word0 = 5 (multisample on, dither on, samples 0), locations all 0x88.
+
+### PolygonState (4 bytes)
+bits 0-1 cull face, bit 2 front face, bits 3-4 polygon mode, bits 15-18 polygon-offset enables. Default 0x14 = cull NONE, CCW, FILL, no offset (sdk+0x5c6f80).
+
+### VertexAttribState (4 bytes)
+bits 0-4 stream index, bit 6 "format set" (enabled), bits 7-20 relative offset (14 bits, max 16383), bits 21-30 format (10 bits); bits 5 and 31 are kept as they are. Default 0 (sdk+0x5c6cd0, 0x5c6ce0).
+
+### VertexStreamState (8 bytes)
++0 u32 stride, +4 u32 divisor. Default 0/0 (sdk+0x5c6d50).
+
+All setters store the argument without range checks (no masking of the enum arguments beyond the shift/mask shown). The host's `nvn_obj.h` bit layouts are its own and all fit the sizes above. The only host gap is MultisampleState coverage truncation: `ms_st` has spare bytes for it.
+
+### Function table: BlendState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnBlendStateSetDefaults` | sdk+0x5c69a0 | 9 | same | u64 = 0x01020102_110c0000 → see bit layout (target 0, src ONE / dst ZERO, eq ADD, premultiplied src = 1, normalized dst = 1) |
+| `nvnBlendStateSetBlendEquation` | sdk+0x5c6a20 | 8 | same | word0 bits 24-26 RGB, 28-30 alpha |
+| `nvnBlendStateSetBlendFunc` | sdk+0x5c69e0 | 8 | same | word1: srcRGB bits 0-6, dstRGB 8-14, srcA 16-22, dstA 24-30 |
+| `nvnBlendStateSetBlendTarget` | sdk+0x5c69c0 | 8 | same | word0 bits 0-2 (no masking of the argument) |
+| `nvnBlendStateGetAdvancedMode` | sdk+0x5c6b40 | 0 | same | bits 8-13 |
+| `nvnBlendStateGetAdvancedNormalizedDst` | sdk+0x5c6b70 | 0 | same | bit 19 |
+| `nvnBlendStateGetAdvancedOverlap` | sdk+0x5c6b50 | 0 | same | bits 16-17 |
+| `nvnBlendStateGetAdvancedPremultipliedSrc` | sdk+0x5c6b60 | 0 | same | bit 18 |
+| `nvnBlendStateGetBlendEquation` | sdk+0x5c6b20 | 0 | same | bits 24-26 / 28-30 |
+| `nvnBlendStateGetBlendFunc` | sdk+0x5c6ae0 | 0 | same | word1 fields |
+| `nvnBlendStateGetBlendTarget` | sdk+0x5c6ad0 | 0 | same | bits 0-2 |
+| `nvnBlendStateSetAdvancedMode` | sdk+0x5c6a50 | 0 | same | word0 bits 8-13 |
+| `nvnBlendStateSetAdvancedNormalizedDst` | sdk+0x5c6ab0 | 0 | same | word0 bit 19 |
+| `nvnBlendStateSetAdvancedOverlap` | sdk+0x5c6a70 | 0 | same | word0 bits 16-17 |
+| `nvnBlendStateSetAdvancedPremultipliedSrc` | sdk+0x5c6a90 | 0 | same | word0 bit 18 |
+
+### Function table: ChannelMaskState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnChannelMaskStateSetChannelMask` | sdk+0x5c6b90 | 7 | same | 4 bits per target at bit 4*index: r=1 g=2 b=4 a=8 |
+| `nvnChannelMaskStateSetDefaults` | sdk+0x5c6b80 | 2 | same | 0xffffffff (all channels of all 8 targets enabled) |
+| `nvnChannelMaskStateGetChannelMask` | sdk+0x5c6be0 | 0 | same | reads the nibble back as 4 booleans |
+
+### Function table: ColorState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnColorStateSetDefaults` | sdk+0x5c6c10 | 9 | same | 0x08030000: blend enables 0, logic op COPY (3), alpha test ALWAYS (8) |
+| `nvnColorStateSetLogicOp` | sdk+0x5c6c60 | 8 | same | byte2 |
+| `nvnColorStateSetBlendEnable` | sdk+0x5c6c20 | 7 | same | byte1 bit index (8 targets) |
+| `nvnColorStateSetAlphaTest` | sdk+0x5c6c80 | 2 | same | bits 24-27 |
+| `nvnColorStateGetAlphaTest` | sdk+0x5c6cc0 | 0 | same | byte3 & 0xf |
+| `nvnColorStateGetBlendEnable` | sdk+0x5c6ca0 | 0 | same | byte1 >> index & 1 |
+| `nvnColorStateGetLogicOp` | sdk+0x5c6cb0 | 0 | same | byte2 |
+
+### Function table: DepthStencilState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnDepthStencilStateSetStencilFunc` | sdk+0x5c6e40 | 10 | same | face bit0 → word1 bits 0-3, face bit1 → bits 16-19 |
+| `nvnDepthStencilStateSetStencilOp` | sdk+0x5c6e80 | 10 | same | front: fail 4-7, depthFail 12-15, depthPass 8-11; back: fail 20-23, depthFail 28-31, depthPass 24-27 |
+| `nvnDepthStencilStateSetDepthTestEnable` | sdk+0x5c6dc0 | 9 | same | word0 bit 0 |
+| `nvnDepthStencilStateSetDepthWriteEnable` | sdk+0x5c6de0 | 9 | same | word0 bit 1 |
+| `nvnDepthStencilStateSetStencilTestEnable` | sdk+0x5c6e20 | 9 | same | word0 bit 2 |
+| `nvnDepthStencilStateSetDepthFunc` | sdk+0x5c6e00 | 8 | same | word0 bits 4-7 |
+| `nvnDepthStencilStateSetDefaults` | sdk+0x5c6da0 | 2 | same | 0x11181118_00000022: depth test off, depth write on, stencil test off, depth func LESS; both faces stencil func ALWAYS, ops KEEP/KEEP/KEEP |
+| `nvnDepthStencilStateGetDepthFunc` | sdk+0x5c6ef0 | 0 | same | bits 4-7 |
+| `nvnDepthStencilStateGetDepthTestEnable` | sdk+0x5c6ed0 | 0 | same | bit 0 |
+| `nvnDepthStencilStateGetDepthWriteEnable` | sdk+0x5c6ee0 | 0 | same | bit 1 |
+| `nvnDepthStencilStateGetStencilFunc` | sdk+0x5c6f10 | 0 | same | BACK (2) → back field, any other face → front |
+| `nvnDepthStencilStateGetStencilOp` | sdk+0x5c6f30 | 0 | same | BACK (2) → back fields, else front |
+| `nvnDepthStencilStateGetStencilTestEnable` | sdk+0x5c6f00 | 0 | same | bit 2 |
+
+### Function table: MultisampleState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnMultisampleStateSetDefaults` | sdk+0x5c7050 | 1 | same | word0 = 5 (multisample on, alpha-to-coverage dither on, samples 0), sample locations bytes +4..+0x13 = 0x88 (all centred), +0x14 = 0 |
+| `nvnMultisampleStateGetAlphaToCoverageDither` | sdk+0x5c7120 | 0 | same | bit 2 |
+| `nvnMultisampleStateGetAlphaToCoverageEnable` | sdk+0x5c7110 | 0 | same | bit 1 |
+| `nvnMultisampleStateGetCoverageModulationMode` | sdk+0x5c7180 | 0 | same | bits 13-14 |
+| `nvnMultisampleStateGetCoverageToColorEnable` | sdk+0x5c71e0 | 0 | same | bit 20 |
+| `nvnMultisampleStateGetCoverageToColorOutput` | sdk+0x5c7210 | 0 | same | bits 21-23 |
+| `nvnMultisampleStateGetCoverageTruncationEnable` | sdk+0x5c71b0 | 0 | **new**: (const NVNmultisampleState*) → NVNboolean | bit 5 |
+| `nvnMultisampleStateGetMultisampleEnable` | sdk+0x5c70f0 | 0 | same | bit 0 |
+| `nvnMultisampleStateGetRasterSamples` | sdk+0x5c7150 | 0 | same | bits 15-19 |
+| `nvnMultisampleStateGetSampleLocationsEnable` | sdk+0x5c7240 | 0 | same | bit 3 |
+| `nvnMultisampleStateGetSampleLocationsGrid` | sdk+0x5c7250 | 0 | same | grid width/height from max(samples, raster samples) via a table (sdk data 0xb7aa50) |
+| `nvnMultisampleStateGetSampleLocationsGridEnable` | sdk+0x5c72e0 | 0 | same | bit 4 |
+| `nvnMultisampleStateGetSamples` | sdk+0x5c7100 | 0 | same | bits 8-12 |
+| `nvnMultisampleStateSetAlphaToCoverageDither` | sdk+0x5c70b0 | 0 | same | bit 2 |
+| `nvnMultisampleStateSetAlphaToCoverageEnable` | sdk+0x5c7090 | 0 | same | bit 1 |
+| `nvnMultisampleStateSetCoverageModulationMode` | sdk+0x5c7160 | 0 | same | bits 13-14 |
+| `nvnMultisampleStateSetCoverageToColorEnable` | sdk+0x5c71c0 | 0 | same | bit 20 |
+| `nvnMultisampleStateSetCoverageToColorOutput` | sdk+0x5c71f0 | 0 | same | bits 21-23 |
+| `nvnMultisampleStateSetCoverageTruncationEnable` | sdk+0x5c7190 | 0 | **new**: (NVNmultisampleState*, NVNboolean) | bit 5 |
+| `nvnMultisampleStateSetMultisampleEnable` | sdk+0x5c7070 | 0 | same | bit 0 |
+| `nvnMultisampleStateSetRasterSamples` | sdk+0x5c7130 | 0 | same | bits 15-19 |
+| `nvnMultisampleStateSetSampleLocations` | sdk+0x5c72f0 | 0 | same | (state, first, count, const float *xy): clamps each coordinate to [0,1] and packs it as a 4-bit value into bytes +4..+0x13 [INFERENCE: 16 samples × (x,y) nibbles] |
+| `nvnMultisampleStateSetSampleLocationsEnable` | sdk+0x5c7220 | 0 | same | bit 3 |
+| `nvnMultisampleStateSetSampleLocationsGridEnable` | sdk+0x5c72c0 | 0 | same | bit 4 |
+| `nvnMultisampleStateSetSamples` | sdk+0x5c70d0 | 0 | same | bits 8-12 |
+
+### Function table: PolygonState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnPolygonStateSetFrontFace` | sdk+0x5c6fb0 | 9 | same | bit 2 |
+| `nvnPolygonStateSetPolygonMode` | sdk+0x5c6fd0 | 9 | same | bits 3-4 |
+| `nvnPolygonStateSetCullFace` | sdk+0x5c6f90 | 8 | same | bits 0-1 |
+| `nvnPolygonStateSetPolygonOffsetEnables` | sdk+0x5c6ff0 | 7 | same | bits 15-18 |
+| `nvnPolygonStateSetDefaults` | sdk+0x5c6f80 | 2 | same | 0x14: cull NONE, front CCW, mode FILL, offset enables 0 |
+| `nvnPolygonStateGetCullFace` | sdk+0x5c7010 | 0 | same | bits 0-1 |
+| `nvnPolygonStateGetFrontFace` | sdk+0x5c7020 | 0 | same | bit 2 |
+| `nvnPolygonStateGetPolygonMode` | sdk+0x5c7030 | 0 | same | bits 3-4 |
+| `nvnPolygonStateGetPolygonOffsetEnables` | sdk+0x5c7040 | 0 | same | bits 15-18 |
+
+### Function table: VertexAttribState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnVertexAttribStateSetDefaults` | sdk+0x5c6cd0 | 5 | same | 0 |
+| `nvnVertexAttribStateSetFormat` | sdk+0x5c6ce0 | 4 | same (relative offset kept in 14 bits) | bits 21-30 format (10 bits), bits 7-20 relative offset, bit 6 = "enabled" set |
+| `nvnVertexAttribStateSetStreamIndex` | sdk+0x5c6d00 | 3 | same | bits 0-4 |
+| `nvnVertexAttribStateGetFormat` | sdk+0x5c6d20 | 0 | same | format bits 21-30, offset bits 7-20 |
+| `nvnVertexAttribStateGetStreamIndex` | sdk+0x5c6d40 | 0 | same | bits 0-4 |
+
+### Function table: VertexStreamState
+| function | sdk impl | main uses | NVN1 ABI | semantics (evidence: impl offset) |
+|---|---|---|---|---|
+| `nvnVertexStreamStateSetDefaults` | sdk+0x5c6d50 | 3 | same | stride 0, divisor 0 |
+| `nvnVertexStreamStateSetStride` | sdk+0x5c6d60 | 3 | register ABI same; stored as 32 bits | u32 +0 |
+| `nvnVertexStreamStateSetDivisor` | sdk+0x5c6d70 | 2 | same | u32 +4 |
+| `nvnVertexStreamStateGetDivisor` | sdk+0x5c6d90 | 0 | same | u32 +4 |
+| `nvnVertexStreamStateGetStride` | sdk+0x5c6d80 | 0 | returns 32 bits | u32 +0 |
+
+## Open questions: resources
+- Runtime values of device+0xd4 (big page / mapping granularity) and device+0xd8 (`MEMORY_POOL_PAGE_SIZE`). Both come from NvRm GPU info +0x2c0/+0x2c4 and were not observed. The static table says 0x10000 for 0x3a. E2 reports the AS is created with big_page_size 0.
+- Meaning of memory-pool flag 0x400 (only in the driver's internal pool 0x412); of DeviceBuilder flags 0x8000 (upgrade CPU_UNCACHED to cached), 0x10000 (extra generic mapping +0x20, storage-class bit 0x200, descriptor bit 24) and bit 31 (no CPU-identity VA reservation). These names belong to the Device family.
+- Texture flags 0x800 (mip rounding?) and 0x1000 (kind-chooser hint) have no NVN-side name. Formats 0x9d–0xa2 are unnamed.
+- How ExternalMemoryPoolBuilder is consumed: no driver function reads it. Likely a C++ inline in the NVN2 header or a later SDK.
+- Reserved-list mode (builder flag 0x20000000, {type, va, size} list at +0x28/+0x30): no public setter found.
+- Texture layout bytes +0x58 and +0x70..+0x72 (block-linear parameters) were not fully decoded. The host computes its own layout, so this only matters if the game reads them.
+- Whether MKW reads any NVN object field directly (inline header code, as NVN1 did for command buffers) was not checked for these objects. All MKW accesses examined go through the proc table.
+- The descriptor encoders (sdk+0x5fd0b0 texture, sdk+0x5c67d0 sampler) were not decoded: nxnative does not need hardware TIC/TSC words.
 
 ## Program and ProgramBuilder
 
