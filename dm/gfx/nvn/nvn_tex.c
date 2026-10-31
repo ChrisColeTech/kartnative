@@ -16,6 +16,7 @@ static fmt_t fmt_of(int f) {
         int b8 = (f <= 0x42) || (f == 0x45 || f == 0x46) || (f == 0x49 || f == 0x4A);
         return (fmt_t){b8 ? 8 : 16, 4, 4};
     }
+    if (f >= 0x9D && f <= 0xA0) return (fmt_t){f & 1 ? 8 : 16, 4, 4};   // NVN2 (Switch 2): 0x9d / 0x9f the hardware format of RGB_DXT1, 0x9e / 0xa0 that of RGBA_DXT3 (docs/reference/nvn2.md#nvn2-format-table-and-new-formats)
     static const struct { uint8_t lo, hi, bpb; } r[] = {
         {0x01,0x04,1},{0x05,0x09,2},{0x0A,0x0C,4},{0x0D,0x10,2},{0x11,0x15,4},{0x16,0x18,8},
         {0x19,0x1C,3},{0x1D,0x21,6},{0x22,0x24,12},{0x25,0x28,4},{0x29,0x2D,8},{0x2E,0x30,16},
@@ -23,6 +24,7 @@ static fmt_t fmt_of(int f) {
         {0x51,0x52,1},{0x53,0x54,2},{0x55,0x56,4},{0x57,0x58,2},{0x59,0x5A,4},{0x5B,0x5C,8},
         {0x5D,0x5E,3},{0x5F,0x60,6},{0x61,0x62,12},{0x63,0x64,4},{0x65,0x66,8},{0x67,0x68,16},
         {0x69,0x6C,4},{0x6D,0x70,4},{0x71,0x75,8},{0x76,0x78,16},{0x95,0x98,2},{0x99,0x9C,4},
+        {0xA1,0xA2,8},   // NVN2: 8-byte signed / unsigned integer texels, the hardware formats of RG32I / RG32UI
     };
     for (unsigned i = 0; i < sizeof r / sizeof *r; i++)
         if (f >= r[i].lo && f <= r[i].hi) return (fmt_t){r[i].bpb, 1, 1};
@@ -30,6 +32,7 @@ static fmt_t fmt_of(int f) {
 }
 
 int nvn_fmt_bpb(int f, int *bw, int *bh) { fmt_t t = fmt_of(f); if (bw) *bw = t.bw; if (bh) *bh = t.bh; return t.bpb; }
+int nvn_fmt_is_bc(int f) { return (f >= 0x41 && f <= 0x50) || (f >= 0x9D && f <= 0xA0); }
 
 static uint32_t mip(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
 static uint32_t blk(uint32_t s, uint32_t b) { return (s + b - 1) / b; }

@@ -6,13 +6,13 @@ The part of the graphics layer that deals with texture data, called by the repla
 2. unpacks the Switch's "block-linear" layout into an ordinary row-by-row layout;
 3. decompresses BC textures on GPUs that do not support BC compressed textures.
 
-Block linear is how the Tegra X1 GPU stores textures: the data is not one row after another, but interleaved in small blocks of 64 bytes × 8 rows (GOBs), and several GOBs are then stacked into larger blocks according to a "block height" and a "block depth". The game's packaged texture files are in exactly this layout, and it must be undone before uploading to Metal.
+Block linear is how the Tegra X1 GPU stores textures: the data is not one row after another, but interleaved in small blocks of 64 bytes × 8 rows (GOBs), and several GOBs are then stacked into larger blocks according to a "block height" and a "block depth". The game's packaged texture files are in exactly this layout, and it must be undone before uploading to Metal. The Switch 2 GPU uses the same blocks with bits 5 and 6 of the offset inside a GOB exchanged; a Switch 2 build sets `nvn_gob_s2` and everything here follows it ([Switch 2 block-linear GOBs](../../../docs/reference/nvn-objects.md#switch-2-block-linear-gobs)).
 
 ## Files
 
 | File | Contents |
 |---|---|
-| `nvn_fmt_mtl.h`, `nvn_fmt_mtl.c` | `nvn_fmt_to_mtl()`: NVN format (0x01–0x9C) → Metal pixel format + component remapping. Returns 1 for an exact match, 2 for a substitute (precision, bit order or interpretation differs and a conversion is needed), 0 when Metal has no corresponding format. How each format is handled is written in the comments inside the table. Pure C, no dependency on Metal headers |
+| `nvn_fmt_mtl.h`, `nvn_fmt_mtl.c` | `nvn_fmt_to_mtl()`: NVN format (0x01–0x9C, and NVN2's 0x9D–0xA2) → Metal pixel format + component remapping. Returns 1 for an exact match, 2 for a substitute (precision, bit order or interpretation differs and a conversion is needed), 0 when Metal has no corresponding format. How each format is handled is written in the comments inside the table. Pure C, no dependency on Metal headers |
 | `nvn_deswizzle.h`, `nvn_deswizzle.c` | `nvn_deswizzle()`: deswizzles one level and one layer from block linear to linear; `nvn_swizzle()`: the reverse, used for round trips in unit tests; `nvn_bl_offset()`: the block-linear address of a single point. Pure C |
 | `nvn_deswizzle_gpu.h`, `nvn_deswizzle_gpu.m` | A Metal compute shader version of the same deswizzling algorithm, used by the replay layer when uploading packaged textures; when initialization fails or an unsupported format is encountered, the replay layer falls back to the CPU version |
 | `tests/` | Unit tests |
@@ -29,7 +29,7 @@ Only GPUs with BC compressed textures are supported (`supportsBCTextureCompressi
 make -C dm/gfx/tex/tests run       # run t_fmt_mtl and t_tex
 ```
 
-- **`t_fmt_mtl`**: takes the mapping for every NVN format in 0x01–0x9C and, for every one whose mapping is not 0, actually creates a texture on the local Metal device; all of them must be created successfully. It also checks that every NVN format with sRGB in its name lands on a Metal sRGB format. No game files needed.
+- **`t_fmt_mtl`**: takes the mapping for every NVN format in 0x01–0xA2 and, for every one whose mapping is not 0, actually creates a texture on the local Metal device; all of them must be created successfully. It also checks that every NVN format with sRGB in its name lands on a Metal sRGB format. No game files needed.
 - **`t_tex`**: the deswizzling tests, in several groups:
 
   | Group | Criterion |
@@ -38,6 +38,8 @@ make -C dm/gfx/tex/tests run       # run t_fmt_mtl and t_tex
   | B address formula | The result of `nvn_bl_offset()` equals the address computed by hand from the public layout rules |
   | D differential copies | Both copy directions match a byte-address oracle for 1,029 deterministic layouts, including padded pitches, byte tails, sparse mip tails, packaged block dimensions, arrays and cubes; untouched storage and row padding are compared too |
   | E hand-made 3D | Places markers at hand-computed addresses, checks where they land after deswizzling, and checks block height, block depth and storage size |
+  | M Mario Kart World layouts | Level offsets and storage of three of MKW's packaged textures equal its BNTX files' mip offsets and image size |
+  | G Switch 2 GOB | With `nvn_gob_s2`: hand-computed in-GOB offsets, the whole GOB as Switch 1's offsets with bits 5 and 6 exchanged, group D's 1,029 layouts and round trips |
 
   The A round trip can only prove "one-to-one and within bounds"; it cannot prove that the layout formula is right. What backs it up is the hand-computed addresses of groups B and E, and the games that render right.
 

@@ -1,4 +1,4 @@
-// NVNformat (nvn.h 0x01–0x9C) → Metal. The table is written entry by entry in NVN enum order; unlisted formats (including 0 and out of range) return 0.
+// NVNformat (nvn.h 0x01–0x9C, and NVN2's 0x9D–0xA2) → Metal. The table is written entry by entry in NVN enum order; unlisted formats (including 0 and out of range) return 0.
 // Component remapping: "no alpha" formats such as RGBX / RGB_DXT1 read a as 1; RGB-family 16-bit packed formats swap r/b; all others are identity.
 // BC1–7 need GPU BC support (MTLDevice.supportsBCTextureCompression: Apple silicon Macs, A17 Pro and later, M1 iPads); the table does not check it, mtl_init (nvn_mtl.m) and the iOS front end (main.m) refuse a device without it.
 #include "nvn_fmt_mtl.h"
@@ -25,7 +25,7 @@ typedef struct { uint16_t mtl; uint8_t kind, noalpha, rb; } ent;   // kind: 1 ex
 #define SR(m) {m, 2, 0, 1}    // substitute, swap r/b
 #define SXR(m) {m, 2, 1, 1}
 
-static const ent T[0x9D] = {
+static const ent T[0xA3] = {
     [0x01] = E(R8Unorm), E(R8Snorm), E(R8Uint), E(R8Sint),
     [0x05] = E(R16Float), E(R16Unorm), E(R16Snorm), E(R16Uint), E(R16Sint),
     [0x0A] = E(R32Float), E(R32Uint), E(R32Sint),
@@ -68,6 +68,9 @@ static const ent T[0x9D] = {
     // 0x79–0x94 ASTC is computed by astc_off (two groups, LDR / sRGB, 14 each)
     [0x95] = S(B5G6R5Unorm), SX(BGR5A1Unorm), S(BGR5A1Unorm), S(A1BGR5Unorm),
     [0x99] = X(BGRA8Unorm), E(BGRA8Unorm), X(BGRA8Unorm_sRGB), E(BGRA8Unorm_sRGB),
+    // NVN2 (Switch 2, names unknown): the driver's format table gives 0x9D–0xA0 the hardware formats of RGB_DXT1 (no alpha) and RGBA_DXT3, 0x9F / 0xA0 sRGB, under a format
+    // class of their own; 0xA1 / 0xA2 are 8-byte signed / unsigned integer texels in the hardware formats of RG32I / RG32UI (docs/reference/nvn2.md#nvn2-format-table-and-new-formats)
+    [0x9D] = X(BC1), E(BC2), X(BC1_sRGB), E(BC2_sRGB), E(RG32Sint), E(RG32Uint),
 };
 
 // NVN ASTC order: 4x4 5x4 5x5 6x5 6x6 8x5 8x6 8x8 10x5 10x6 10x8 10x10 12x10 12x12; Metal skips one number between 6x6 and 8x5
