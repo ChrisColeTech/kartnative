@@ -4021,12 +4021,16 @@ static int rt_range_pr_ro(NvProg *p) {
     for (int k=0;k<6;k++) if (p->sh[k] && (k>1 || p->sh[k]->stage != k || !p->sh[k]->range_ro || p->sh[k]->rf.drv_read[0] || p->sh[k]->rf.drv_read[2])) return 0;
     return 1;
 }
+// Keys whose library failed to load (missing file, reflection refused): tried and logged once, not again for every program that names them (Mario Kart World makes one program
+// per material around the same few missing shaders, and each retry logged shader_load's red line again). Read and written on the submit thread only, as g_shcache
+static NSMutableSet<NSString *> *g_shfail;
 static NvShader *shader_get(NSString *pc, int stage) {
     if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
     NvShader *o = g_shcache[pc];
     if (o) return o;
+    if ([g_shfail containsObject:pc]) return nil;
     uint64_t bt = bp_now(); o = shader_load(pc, stage, 0);
-    if (!o) return nil;
+    if (!o) { if (!g_shfail) g_shfail = [NSMutableSet set]; [g_shfail addObject:pc]; return nil; }
     g_shcache[pc] = o;
     pso_record("S\t%s\t%d\n", pc.UTF8String, stage);
     pso_user_record("S\t%s\t%d\n", pc.UTF8String, stage);
@@ -7667,7 +7671,7 @@ static void shader_prefetch_rest(void) {
             NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
             if (st < 0) continue;
             NSString *lk = [k stringByAppendingString:@"_b"];
-            if (g_shcache[lk] || [seen containsObject:lk]) continue;
+            if (g_shcache[lk] || [g_shfail containsObject:lk] || [seen containsObject:lk]) continue;
             [seen addObject:lk]; [keys addObject:lk]; [stages addObject:@(st)];
         }
     }
@@ -7680,7 +7684,7 @@ static void shader_prefetch_rest(void) {
         os_unfair_lock_lock(&g_pf_lock); if (o) res[i] = o; os_unfair_lock_unlock(&g_pf_lock);
     } });
     unsigned got = 0;
-    for (NSUInteger i = 0; i < n; i++) { NvShader *o = res[i]; if ((id)o == NSNull.null) continue;
+    for (NSUInteger i = 0; i < n; i++) { NvShader *o = res[i]; if ((id)o == NSNull.null) { if (!g_shfail) g_shfail = [NSMutableSet set]; [g_shfail addObject:keys[i]]; continue; }
         g_shcache[keys[i]] = o; got++;
         pso_record("S\t%s\t%d\n", keys[i].UTF8String, stages[i].intValue); pso_user_record("S\t%s\t%d\n", keys[i].UTF8String, stages[i].intValue); }
     uint64_t dt = bp_now() - t0; g_bp_lib_n += got; g_bp_lib_ns += dt; g_pf_n += got; g_pf_ns += dt;
