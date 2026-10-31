@@ -41,6 +41,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) (Unity 2022.3.54f1 on SDK 18.3.5: `main+0x3e7288` starts a thread and waits for it to signal `main+0x539cf80`). With the fix the game creates 40 threads and reaches its title.
 - **Note:** of the 20 games extracted on this machine, only this `main` imports the function.
 
+### Six cores on the Switch 2 (`svcGetInfo` type 0)
+
+- **Symptom:** a Switch 2 game's job system starts workers for three cores only (`DM_THR=1`: no `CreateThread` with core 3, 4 or 5), or sets core masks outside the cores the host reports.
+- **Cause:** a Switch 2 program's NPDM gives it cores 0 to 5 (Mario Kart World's ThreadInfo capability: cores 0..5, priorities 28..59), and `ThreadManager::GetThreadAvailableCoreMask` asks `GetInfo(CoreMask)`, which the host answered 7.
+- **Fix:** under `DM_GAME_SWITCH2` the core mask is 0x3f (`hle_svc.c`). Cores need nothing else: the host's cores are bookkeeping (`CreateThread` takes core 4 or 5 as given, `GetCurrentProcessorNumber` reports it), and threads are host pthreads.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0: its `ModuleSystemWorker`, `BaseProcExecutor`, `UIJob` and `phive::DepWorker` pools start one thread per core, 0 to 5.
+
 ### Pausing threads and reading their context for garbage collectors
 
 - **Symptom:** in garbage-collected titles (Unity / IL2CPP), live objects freed, with their finalizers releasing native resources.

@@ -92,6 +92,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** [`dm/gfx/hle_nv.c`](../../dm/gfx/hle_nv.c) answers the five `nv::` symbols such a game imports: it records the allocator callbacks (`SetGraphicsAllocator`, `SetGraphicsDevtoolsAllocator`) and the pool from `InitializeGraphics(void*, size_t)`, and `GetGraphicsMemoryInfo` reports that pool (total and free = its size) or zeroes the structure when nothing was initialised. It writes the record of the game's SDK: 0x20 bytes when `DM_SDK_OLD(dm_sdk_major())`, 0x40 otherwise (the boundary the NVN API version and the shared-font layout follow too); the pool figures lie in the first four counters, so both sizes carry them.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0, GameMaker Studio 2, OpenGL through EGL). The game's allocator is never called again, so a zeroed report is equally correct on a GL-only title. The 32-byte overrun on old SDKs was found on Hyrule Warriors: Definitive Edition 1.0.1 (SDK 3.5.1, KTGL, NVN; GitHub issue #708, [PR #709](https://github.com/seedds/nxnative/pull/709)): its startup caller passes a 32-byte record, and AddressSanitizer reported the write past it.
 
+### The Switch 2's 12 GB layout
+
+- **Symptom:** `SetHeapSize OOM: req 0x69000000 > cap 0x8000000`, then SIGSEGV in `StandardAllocator` (`sdk+0x135110`, from `nninitStartup`).
+- **Cause:** a Switch 2 application gets the 12 GB layout's pool, 9809 MiB, and Mario Kart World's `nninitStartup` (`main+0xc387b4`) sets a heap of (total − used) rounded down to 2 MB, less 0x60400000 (the 1540 MB it keeps for other allocators); the provisional profile had a Switch 1 pool (3285 MB) and a 128 MB heap region. The amount kept back belongs to each game's `nninitStartup`, the pool to the console.
+- **Fix:** the profile reports the Switch 2's pool (`app_pool 0x265100000`) and holds a heap region a little larger than the 8 GiB heap that gives (`mem_reserve 0x348000000`: 8.25 GiB of heap region); `SetHeapSize(0x200c00000)` succeeds and only the pages the game touches take memory.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
+
 ## Virtual address memory and the alias region
 
 ### Virtual address memory follows the NPDM's system resource
@@ -323,6 +330,20 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Symptom:** a write through a null pointer at +0x1c0 during startup.
 - **Fix:** `GetInfo(UserExceptionContextAddress)` must return a real buffer.
 - **Found on:** the source names no game.
+
+### The Switch 2 kernel's GetInfo ids 29 to 33
+
+- **Symptom:** `SVC 0x2c outside the alias region 0x…+0`, then an `nn::diag` abort under `nninitInitializeSdkModule` (`sdk+0x14aae4` ← `sdk+0x14a960`, Mario Kart World 1.0.0).
+- **Cause:** the Switch 2 kernel answers `GetInfo` ids the Switch's lacks, and its SDK (19.3.3, Ounce) asks them at start: `nnosInitialize` builds an address-space allocator over [id 29, id 29 + id 30), the remote region `nn::os::RemoteRegionManager` hands addresses out of for memory shared with the graphics server (`sdk+0x14e4f0`); `nn::os::GetRemoteMemoryUsage` returns {id 31, id 32}, the graphics server's remote memory; id 33 is the page granule, of which `VammManager` maps one up front at its node area (`sdk+0x14aa10`) and against which `nn::ro::ProtectRelro` / `RegisterModuleInfo` check module addresses and sizes (`value − 1`). The host answered 0 to every id it did not know, so `MapPhysicalMemory(node, 0)` failed.
+- **Fix:** under `DM_GAME_SWITCH2` (`hle_svc.c`): id 33 is 0x1000; ids 29 / 30 are a 4 GiB region of reserved address space past the heap region, inside the guest block; ids 31 / 32 are 0 (the host takes `nv::InitializeGraphics`, the caller of `nn::gs::sdk::BootGraphicsSystem`, over, so no graphics server memory exists). `DM_SVC=1` logs any other id the host does not know.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
+
+### The Switch 2's `svcSetGpuMemoryAttribute` (svc 0x80)
+
+- **Symptom:** `SVC 0x80 … (placeholder returns success)` in the log.
+- **Cause:** the Switch 2 kernel adds svc 0x80, `SetGpuMemoryAttribute(address, size, mask, attr)`, which the NPDM grants (Mario Kart World's: svcs 0x01-0x36 and 0x80): `nn::gpu::sdk::CreateGpuAccessibleMemory` sets GpuAccessible (0x20) before it registers memory with the GPU and `DestroyGpuAccessibleMemory` clears it (`sdk+0x17b344`, called from `sdk+0x3d0af8` / `+0x3d0d54`), as do `nn::gs` native memories. svcs 0x81 / 0x82 are `nn::dd::Lock` / `UnlockGpuShareableMemory` (0x81 returns three values: the SDK keeps x1 as the physical address and x3 beside the virtual range, `sdk+0x9c830`); the NPDM does not grant them and nothing calls them.
+- **Fix:** under `DM_GAME_SWITCH2` (`hle_svc.c`): svc 0x80 checks its arguments in the kernel's order (address alignment 0xCC01, size 0xCA01, the attribute combination 0xE801, the range 0xD401) and succeeds; the host's GPU sees guest memory at its CPU address, so there is nothing to map, and QueryMemory does not report the attribute (no host code reads it). svcs 0x81 / 0x82 log a red line and return NotImplemented (0xF001).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0 (from its modules; not yet called on the boot path the host runs).
 
 ## Running out of memory
 

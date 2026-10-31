@@ -461,6 +461,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_oe.c`): `oe::DisableAlbumImageTakenNotification`; `oe::IsInStoreDemoModeEnabled` (no); `oe::GetDefaultDisplayResolution` and its change event; `oe::SendServerMaintenanceOverlayNotification`; `oe::SetUserInactivityDetectionTimeExtendedUnsafe`; `oe::GetPerformanceConfiguration`; `oe::SetAlbumImageOrientation`; `oe::Begin` / `EndAutoSleepDisabledSection` and `IsAutoSleepDisabled` (counted); `oe::ExecuteProgram` (logged red: the host runs one program). The ones with a symptom of their own follow: [The startup logo](#the-startup-logo), [Copyright frame buffer overlay](#copyright-frame-buffer-overlay), [Applet resource user ID, launch parameters and VR mode](#applet-resource-user-id-launch-parameters-and-vr-mode), [CPU overclock calls without an apm session](#cpu-overclock-calls-without-an-apm-session), [Focus handling mode decides whether focus changes are notified](#focus-handling-mode-decides-whether-focus-changes-are-notified).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11: `GetDefaultDisplayResolution`, `SendServerMaintenanceOverlayNotification`); [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11: `SetUserInactivityDetectionTimeExtendedUnsafe`); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `GetPerformanceConfiguration`, `SetAlbumImageOrientation`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2: the auto-sleep calls); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`oe::ExecuteProgram`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1, Capcom's MT Framework: `DisableAlbumImageTakenNotification`, then `IsInStoreDemoModeEnabled` from the import list); [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md) (SDK 4.4.0: `GetUserInactivityDetectionTimeExtensionMode`, a null read at `sdk+0x15b73c` when the first level's cinematic camera starts, `CScreenDimmingUtil::DisableScreenDimming`). After all of its fixes The Great Ace Attorney Chronicles runs its frame loop at 30 fps; the black screen it showed was its textures, never uploaded (CPU-written textures, the profile's `tex_flush_upload` and `tex_dirty_upload`: [Mapped-range flushes taken as uploads (`tex_flush_upload`)](nvn-objects.md#mapped-range-flushes-taken-as-uploads-tex_flush_upload), [CPU writes with no flush, caught by page protection (`tex_dirty_upload`)](nvn-objects.md#cpu-writes-with-no-flush-caught-by-page-protection-tex_dirty_upload)).
 
+### The Switch 2's graphics scale (`oe`)
+
+- **Symptom:** a null read at `sdk+0x4f4768` in `nn::oe::SetGraphicsScaleChangedNotificationEnabled`, on the game's Prepare Thread right after `oe::SetFocusHandlingMode` (Mario Kart World 1.0.0, `main+0xc78304`).
+- **Cause:** the Switch 2 SDK (19.3.3) adds a graphics scale to `nn::oe`: `GetGraphicsScalingParameters` asks am's graphics scaling interface (`nn::am::GetGraphicsScalingParametersFunctions`) for a u32 that `GetCurrentGraphicsScale` accepts only as 10, 20 or 30 (GraphicsScale 0, 1, 2; anything else is `UnexpectedDefault`, `sdk+0x4f4700`), and `SetGraphicsScaleChangedNotificationEnabled` goes to the same interface, which the host never makes.
+- **Fix:** hooked (`hle_oe.c`): `GetGraphicsScalingParameters` answers 10, `GetCurrentGraphicsScale` 0, and the notification switch does nothing: the host's scale never changes.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
+
 ### The startup logo
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::oe::FinishStartupLogo`, right after the first frames.
@@ -679,7 +686,21 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with `DM_AUDIO=1`, a run to the first room has no `[diag]` line and the frame counter keeps advancing.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0), in `std::chrono::steady_clock::now()` called from GameMaker's frame-timing helper.
 
+### The Switch 2's 31.25 MHz system counter
+
+- **Symptom:** a Switch 2 game's clocks run at 0.61 of real time: timers, frame pacing and timeouts computed from system ticks come late.
+- **Cause:** the Switch 2's system counter runs at 31.25 MHz, and its SDK converts ticks with that frequency (`nn::os::GetSystemTickFrequency` returns 31,250,000, `sdk+0x145d00` in Mario Kart World 1.0.0); the host produced the Switch's 19.2 MHz ticks (`hle.c` cntpct / cntvct gate, `svc GetSystemTick`).
+- **Fix:** `guest_ticks()` (`hle_os.c`) gives the guest clock as one tick per 32 ns under `DM_GAME_SWITCH2`, 12 per 625 ns otherwise, for both readers. NVN counter timestamps keep their own conversion (`nvn_timestamp.h`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0 (found from its sdk before the first boot). Its modules read no `cntfrq_el0`.
+
 ## Modules and symbols
+
+### The Switch 2 SDK's version string
+
+- **Symptom:** `[RED] sdk: no SDK version string in the sdk module` at load.
+- **Cause:** the Switch 2's SDK spells its version `NintendoSdk_nnSdk-Generic_19_3_3`; `dm_sdk_major` (`loader.c`) expected a digit right after `nnSdk-`.
+- **Fix:** it skips a `Generic_` prefix and reports major 19. Only `DM_SDK_OLD` reads the major version, so nothing else changed.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
 
 ### Host symbol indexes avoid repeated name scans
 

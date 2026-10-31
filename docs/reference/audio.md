@@ -158,6 +158,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## AudioOut and devices
 
+### Audio device calls of the Switch 2 SDK
+
+- **Symptom:** `[RED] sf: the game connects to service aud:u itself, which the host does not serve`, then an `nn::diag` abort under `nn::audio::CreateUserClientSessionByHipc` (`sdk+0x1c4644` ← `CreateAudioRendererManager` ← `detail::GetAudioDeviceService` ← `IsDeviceOutputVolumeAutoTuneModeEnabled`), in the game's sound setup (Mario Kart World 1.0.0, `main+0xba0de0`).
+- **Cause:** the Switch 2 SDK (19.3.3) opens the audio device service through `aud:u` (a user client session whose command 2 gives the renderer manager) for the device calls the host does not answer itself; `Is` / `SetDeviceOutputVolumeAutoTuneModeEnabled` are new ones.
+- **Fix:** hooked (`hle_audren.c`): the mode is kept for the getter, off at start, like the device volume; the host's output has the system's own volume. The other device calls were answered already. Still unhooked in Mario Kart World's imports, not yet met: the virtual output device (`GetDefaultVirtualOutputDevice`, `GetVirtualOutputDeviceProperties`) and the output stream calls (`Open` / `Start` / `Stop` / `Write` / `CloseOutputStream`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
+
 ### Stopping an AudioOut releases its pending buffers
 
 - **Symptom:** FMOD waits for buffer release after stopping an AudioOut, hanging the game during a scene transition.

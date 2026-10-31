@@ -1,7 +1,7 @@
 # Game profile of Mario Kart World (Switch 2, 1.0.0). Bring-up in progress: see README.md
 # Format: see dm/games/README.md
 # Nintendo's sead / agl / gsys engine with NintendoWare and Havok, on SDK 19.3.3 (NintendoSDK_NVN-19_3_3), NVN2; Pia and NPLN networking.
-# subsdk0 is the movie library. RomFS: 205,788 files (23.3 GB), zstd-compressed (.zs) resources; shaders in Shader/*.Nin_Ounce_NVN2.bfsha.zs
+# subsdk0 is Mono (nn::ecli; main imports its allocator). RomFS: 205,788 files (23.3 GB), zstd-compressed (.zs) resources; shaders in Shader/*.Nin_Ounce_NVN2.bfsha.zs
 
 # ---- Identity ----
 title_id	0400C3F00006E000
