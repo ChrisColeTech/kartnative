@@ -136,6 +136,19 @@ void hle_clear_system_event(void *g);    // hle_thread.c: clear a bound service-
 int hle_signal_bound_system_event(void *g);   // hle_thread.c: signal a service-layer SystemEvent only if it is bound (any thread); 0 when it is not
 uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding, 0 if unbound; a rebind gets a new ID even if its address and handle are reused
 int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
+// Switch 2 sync counters (hle_syncpt.c), the host's stand-in for the GPU syncpoints behind nn::gs::NativeSyncHandle {u32 ~counter id, u32 mode, u64 value}:
+// a producer (a video decoder) allocates a counter and advances it; nn::syncpt::sdk events and dm_syncpt_wait compare a handle's value with it. An all-zero handle is always reached
+typedef struct { uint32_t id_inv, mode; uint64_t value; } dm_sync_handle;   // mode 1: 64-bit compare, else 32-bit wrapping
+uint32_t dm_syncpt_alloc(void);          // a fresh counter id (its value starts where the slot's last owner left it, so handles never go backwards)
+void dm_syncpt_free(uint32_t id);
+uint64_t dm_syncpt_value(uint32_t id);
+void dm_syncpt_incr(uint32_t id);        // any thread: +1, then signals the armed events and wakes dm_syncpt_wait
+dm_sync_handle dm_syncpt_handle(uint32_t id, uint64_t value);
+int dm_syncpt_reached(const dm_sync_handle *h);
+int dm_syncpt_wait(const dm_sync_handle *h, uint64_t timeout_ns);   // host threads: 1 reached, 0 timed out
+// Switch 2 decoder images (hle_codec_video.c): what an nn::gs native image handle from nn::codec::GetDecoderImagePoolNativeImageHandle points at
+typedef struct { uint8_t *mem; uint32_t kind, w, h; size_t pitch, chroma_off, size; } dm_gs_image;   // kind: 8 RGBA, 9 BGRA, 10 NV12, all pitch-linear; chroma rows (NV12) at mem + chroma_off with the same pitch
+const dm_gs_image *dm_gs_image_get(uint32_t handle);   // NULL for an unknown handle
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
