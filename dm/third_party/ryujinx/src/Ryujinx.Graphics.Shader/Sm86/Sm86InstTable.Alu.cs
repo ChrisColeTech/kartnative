@@ -28,6 +28,9 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("SEL", 0x007, Sm86Forms.All, Sm86Emit.Sel, Rd);
             Add("USEL", 0x087, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Sel, Rd | U);
             Add("CS2R", 0x805, Sm86Emit.Cs2r, Rd);
+            Add("IMAD.WIDE", 0x025, Sm86Forms.All, Sm86Emit.ImadWide, Rd);
+            Add("UIMAD.WIDE", 0x0a5, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.ImadWide, Rd | U);
+            Add("IMAD.HI", 0x027, Sm86Forms.All, Sm86Emit.ImadHi, Rd);
 
             Add("FADD", 0x021, Sm86Forms.All, Sm86Emit.Fadd, Rd);
             Add("FMUL", 0x020, Sm86Forms.All, Sm86Emit.Fmul, Rd);

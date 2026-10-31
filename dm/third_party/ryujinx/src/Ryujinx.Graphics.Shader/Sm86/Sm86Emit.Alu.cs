@@ -3,6 +3,7 @@ using Ryujinx.Graphics.Shader.Instructions;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
 using System;
+using System.Collections.Generic;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitAluHelper;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -19,8 +20,9 @@ namespace Ryujinx.Graphics.Shader.Sm86
         }
 
         /// <summary>
-        /// IADD3 / UIADD3 d = A + B + C, each source optionally negated (bits 72, 63 / 75). Carry-outs: bits 81-83 and 84-86; .X (bit 74) adds the
-        /// carry-in predicates in bits 87-90 and 77-80. Two carry outputs because three sources and two carries can carry twice; their sum is the carry.
+        /// IADD3 / UIADD3 d = A + B + C, each source negated with bits 72, 63 / 75. .X (bit 74) adds the carry-in predicates in bits 87-90 and 77-80, and
+        /// its modifier bits invert a source (~x) instead of negating it. The carry outputs, bits 81-83 and 84-86, are the exact sum's bits above 31: at
+        /// least one carry, and at least two (a negated source counts as ~x + 1). Semantics: NAK's hardware-tested folds (OpIAdd3, OpIAdd3X).
         /// </summary>
         public static void Iadd3(EmitterContext context)
         {
@@ -30,56 +32,67 @@ namespace Ryujinx.Graphics.Shader.Sm86
             int carryOut0 = inst.Field(81, 3);
             int carryOut1 = inst.Field(84, 3);
 
-            Operand a = IntSrc(context, inst, Slot.A);
-            Operand b = IntSrc(context, inst, Slot.B);
-            Operand c = IntSrc(context, inst, Slot.C);
-
             if (!extended && carryOut0 == RegisterConsts.PredicateTrueIndex && carryOut1 == RegisterConsts.PredicateTrueIndex)
             {
+                Operand a = IntSrc(context, inst, Slot.A);
+                Operand b = IntSrc(context, inst, Slot.B);
+                Operand c = IntSrc(context, inst, Slot.C);
+
                 SetDest(context, inst, context.IAdd(context.IAdd(a, b), c));
                 return;
             }
 
-            // With carries a negated source is ~x plus a carry-in of one (the adder's two's complement), so that subtractions borrow as on the GPU.
-            Operand one = Const(1);
-            Operand ra = context.BitwiseNot(Src(context, inst, Slot.A), Neg(inst, Slot.A));
-            Operand rb = context.BitwiseNot(Src(context, inst, Slot.B), Neg(inst, Slot.B));
-            Operand rc = context.BitwiseNot(Src(context, inst, Slot.C), Neg(inst, Slot.C));
+            var terms = new List<Operand>();
+            int ones = 0;
 
-            Operand sum = AddCarry(context, ra, rb, out Operand carry0);
-
-            if (Neg(inst, Slot.A) || Neg(inst, Slot.B))
+            foreach (Slot slot in new[] { Slot.A, Slot.B, Slot.C })
             {
-                int ones = (Neg(inst, Slot.A) ? 1 : 0) + (Neg(inst, Slot.B) ? 1 : 0);
-                sum = AddCarry(context, sum, Const(ones), out Operand c1);
-                carry0 = context.BitwiseOr(carry0, c1);
+                bool neg = Neg(inst, slot);
+
+                terms.Add(context.BitwiseNot(Src(context, inst, slot), neg));
+                ones += neg && !extended ? 1 : 0;
+            }
+
+            if (ones != 0)
+            {
+                terms.Add(Const(ones));
             }
 
             if (extended)
             {
-                Operand cin0 = context.ConditionalSelect(PredSrc(context, inst.Pred87, inst.Pred87Inv, uniform), one, Const(0));
-                sum = AddCarry(context, sum, cin0, out Operand c2);
-                carry0 = context.BitwiseOr(carry0, c2);
+                terms.Add(PredAsInt(context, PredSrc(context, inst.Pred87, inst.Pred87Inv, uniform)));
+                terms.Add(PredAsInt(context, PredSrc(context, inst.Field(77, 3), inst.Bit(80), uniform)));
             }
 
-            sum = AddCarry(context, sum, rc, out Operand carry1);
-
-            if (Neg(inst, Slot.C))
-            {
-                sum = AddCarry(context, sum, one, out Operand c3);
-                carry1 = context.BitwiseOr(carry1, c3);
-            }
-
-            if (extended)
-            {
-                Operand cin1 = context.ConditionalSelect(PredSrc(context, inst.Field(77, 3), inst.Bit(80), uniform), one, Const(0));
-                sum = AddCarry(context, sum, cin1, out Operand c4);
-                carry1 = context.BitwiseOr(carry1, c4);
-            }
+            Operand sum = SumWithCarries(context, terms, out Operand carries);
 
             SetDest(context, inst, sum);
-            SetPredDest(context, carryOut0, carry0, uniform);
-            SetPredDest(context, carryOut1, carry1, uniform);
+            SetPredDest(context, carryOut0, context.ICompareNotEqual(carries, Const(0)), uniform);
+            SetPredDest(context, carryOut1, context.ICompareGreaterUnsigned(carries, Const(1)), uniform);
+        }
+
+        /// <summary>1 for a true predicate, 0 for a false one.</summary>
+        private static Operand PredAsInt(EmitterContext context, Operand pred)
+        {
+            return context.ConditionalSelect(pred, Const(1), Const(0));
+        }
+
+        /// <summary>The 32-bit sum of <paramref name="terms"/> and the number of carries out of bit 31 (the exact sum's bits above 31).</summary>
+        private static Operand SumWithCarries(EmitterContext context, IReadOnlyList<Operand> terms, out Operand carries)
+        {
+            Operand sum = terms[0];
+
+            carries = Const(0);
+
+            for (int index = 1; index < terms.Count; index++)
+            {
+                Operand next = context.IAdd(sum, terms[index]);
+
+                carries = context.IAdd(carries, PredAsInt(context, context.ICompareLessUnsigned(next, sum)));
+                sum = next;
+            }
+
+            return sum;
         }
 
         /// <summary>32-bit add whose carry-out is a boolean (the result is below an operand when the add wrapped).</summary>
@@ -90,21 +103,78 @@ namespace Ryujinx.Graphics.Shader.Sm86
             return result;
         }
 
-        /// <summary>IMAD / UIMAD d = A * B + C, low 32 bits (bit 73 signed does not change them); negations as IADD3.</summary>
+        /// <summary>
+        /// IMAD / UIMAD d = A * B + C, low 32 bits (bit 73 signed does not change them), sources negated with bits 72, 63 / 75. .X (bit 74) adds the carry-in
+        /// predicate in bits 87-90 and inverts C (~C) instead of negating it: the high word of a 64-bit add (MKW: IMAD.X d, RZ, RZ, c[..], P1 after an
+        /// IADD3 carry). The carry output (bits 81-83, PT in every MKW IMAD) is not modelled.
+        /// </summary>
         public static void Imad(EmitterContext context)
         {
             Sm86Inst inst = Inst(context);
 
-            if (inst.Bit(74))
+            if (inst.Field(81, 3) != RegisterConsts.PredicateTrueIndex)
             {
-                context.TranslatorContext.GpuAccessor.Log($"SM86 IMAD.X at 0x{context.CurrOp.Address:X} is not implemented.");
+                LogNotImplemented(context, "IMAD carry output");
             }
 
             Operand a = IntSrc(context, inst, Slot.A);
             Operand b = IntSrc(context, inst, Slot.B);
-            Operand c = IntSrc(context, inst, Slot.C);
+            Operand product = context.IMultiply(a, b);
 
-            SetDest(context, inst, context.IAdd(context.IMultiply(a, b), c));
+            if (inst.Bit(74))
+            {
+                Operand c = context.BitwiseNot(Src(context, inst, Slot.C), Neg(inst, Slot.C));
+                Operand carryIn = PredAsInt(context, PredSrc(context, inst.Pred87, inst.Pred87Inv, IsUniform(inst)));
+
+                SetDest(context, inst, context.IAdd(context.IAdd(product, c), carryIn));
+                return;
+            }
+
+            SetDest(context, inst, context.IAdd(product, IntSrc(context, inst, Slot.C)));
+        }
+
+        /// <summary>IMAD.HI d = the high 32 bits of A * B (signed with bit 73) + C: PTX mad.hi, equal to (A * B + (C &lt;&lt; 32)) &gt;&gt; 32.</summary>
+        public static void ImadHi(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "IMAD.HI", ModMask(73, 75, 81, 82, 83, 87, 88, 89, 90));
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand b = Src(context, inst, Slot.B);
+            Operand high = inst.Bit(73) ? context.MultiplyHighS32(a, b) : context.MultiplyHighU32(a, b);
+
+            SetDest(context, inst, context.IAdd(high, IntSrc(context, inst, Slot.C)));
+        }
+
+        /// <summary>
+        /// IMAD.WIDE / UIMAD.WIDE d:d+1 = A * B (the 64-bit product, signed with bit 73) + the 64-bit pair C:C+1, negated with C's neg bit. Negated
+        /// A / B and .X are not modelled (not in MKW).
+        /// </summary>
+        public static void ImadWide(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            if (Neg(inst, Slot.A) || Neg(inst, Slot.B) || inst.Bit(74) || inst.Field(81, 3) != RegisterConsts.PredicateTrueIndex)
+            {
+                LogNotImplemented(context, "IMAD.WIDE with a negated factor, .X or a carry output");
+            }
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand b = Src(context, inst, Slot.B);
+            (Operand cLo, Operand cHi) = SrcPair(context, inst, Slot.C);
+
+            if (Neg(inst, Slot.C))
+            {
+                cHi = context.IAdd(context.BitwiseNot(cHi), PredAsInt(context, context.ICompareEqual(cLo, Const(0))));
+                cLo = context.INegate(cLo);
+            }
+
+            Operand lo = AddCarry(context, context.IMultiply(a, b), cLo, out Operand carry);
+            Operand high = inst.Bit(73) ? context.MultiplyHighS32(a, b) : context.MultiplyHighU32(a, b);
+            Operand hi = context.IAdd(context.IAdd(high, cHi), PredAsInt(context, carry));
+
+            SetDestPair(context, inst, lo, hi);
         }
 
         /// <summary>LOP3.LUT / ULOP3.LUT d = LUT(A, B, C), table in bits 72-79; predicate output (result != 0) in bits 81-83.</summary>
