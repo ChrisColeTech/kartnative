@@ -77,7 +77,7 @@ What MKW allocates for each NVN2 object (the reserved size its SDK headers give)
 | +0x0 | window origin mode | `Get/SetWindowOriginMode` |
 | +0x4 | depth mode | `Get/SetDepthMode` |
 | +0x8 | device flags (bits 9 and 10 / mask 0x600 start optional driver layers; bit 10 loads the separate "dlss" module, see [Dlss](#dlss)) | sdk+0x5b54e0, sdk+0x5b0c50 |
-| +0x10..+0x11c | GPU description copied from `NvRmGpuDeviceGetInfo` (sdk+0x5bf090): +0x54 / +0x58 GPU architecture words a shader control section must match, +0x80 / +0x84 timestamp ns numerator / denominator, +0xb0 / +0xb4 / +0xbc scratch-memory factors, +0xd8 memory-pool page size (the GPU's value, at least 64 KiB; item 0x3a) | sdk+0x5bf090, sdk+0x5b57c0 |
+| +0x10..+0x11c | GPU description copied from `NvRmGpuDeviceGetInfo` (sdk+0x5bf090): +0x54 / +0x58 GPU architecture and implementation (0x170 / 0xe: every MKW control section carries these at +0xc / +0xe, which must match), +0x80 / +0x84 timestamp ns numerator / denominator, +0xb0 / +0xb4 / +0xbc scratch-memory factors, +0xd8 memory-pool page size (the GPU's value, at least 64 KiB; item 0x3a) | sdk+0x5bf090, sdk+0x5b57c0 |
 | +0x968 / +0x970 / +0x980 | array and count of initialized memory pools, and their mutex: the driver turns a GPU address into a CPU pointer by searching it | sdk+0x5bf8b0 |
 | +0x9a0 / +0x9a8 / +0x9b0 | list and mutex of programs | sdk+0x5bf2c0 |
 | +0x9d0 | NvRm GPU context (device, address space, channel) | sdk+0x5b4450 |
