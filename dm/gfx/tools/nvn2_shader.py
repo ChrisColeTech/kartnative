@@ -10,6 +10,7 @@ Control section (0xd8 bytes; u32 unless noted; every field below was read on Mar
   +0x40 start of the constant segment                                   +0x44 code area length
   +0x4c register count                                                  +0x56 u8 stage: 0 vertex 1 fragment 2 geometry 3 tess control 4 tess evaluation 5 compute 6 task 7 mesh
   stage union from +0x58: compute +0x58 / +0x5c / +0x60 thread group x y z, +0x64 shared memory bytes; fragment +0x62 u16 colour targets written
+  compute +0xa8..+0xbb: the program's own c0 layout (compute_c0)
 Code area: graphics stages (task and mesh too) start with a 0x80-byte program header whose first 0x50 bytes are a Maxwell SPH (version 4), then the SM86
 instructions (16 bytes each); compute has no header. After the last instruction (+0x38) the area is zero up to +0x40; [+0x40, +0x44) holds the constant
 segment (its first +0x3c bytes) or, in 11 of the 18 mesh programs, a second SPH (geometry type, output topology 1, at most 1 output vertex)."""
@@ -80,6 +81,38 @@ def instructions(ctl, code):
 def c1(ctl, code):
     """The constant segment the program reads as c[1] (control +0x40, +0x3c bytes; b'' without one)"""
     return code[u32(ctl, 0x40):u32(ctl, 0x40) + u32(ctl, 0x3c)]
+
+
+# A compute program's c0 (control +0xa8 = 1, all 728 of Mario Kart World's): the driver packs the compute bind state into a buffer of the program's own layout at each
+# dispatch (sdk+0x5ebbb0, called by the dispatch builder sdk+0x5eb2b0 with the program's copy of control +0xa8..+0xbb). After a 0x10-byte header (the shader reads the
+# workgroup counts x, y, z at +4 / +8 / +0xc) come, in this order and only for counts that are not zero: push-constant block k (control +0xa9 + k, k < 8: that many words
+# of nvnCommandBufferPushComputeConstants block k, padded to 16 bytes), then the tables below (count byte, entry bytes), entry i holding bind slot i of its kind: uniform
+# buffers and storage buffers {u64 address, u32 size, u32 0}, textures (nvnCommandBufferBindTexture), separate textures, separate samplers and images the bound 64-bit
+# handle, acceleration structures the bound address; then, when control +0xb9 is set, one 16-byte row of the bound device message buffer. Control +0xba (u16) is the
+# total; +0xb8 is not read. The queue keeps the bind state in Switch 1's layout and copies from there (uniform slot r from its c0 shadow + 0x210 + 0x10 r, storage
+# slot r from + 0x310 + 0x10 r, textures from a 32-slot table, images from an 8-slot one: tokens 9 to 0xe, 0x24, 0x48 and 0x61 of sdk+0x5c5280)
+CS_C0_HEADER = 0x10
+CS_C0_PUSH = 0xa9      # 8 push-constant block word counts
+CS_C0_TABLES = (('uniform', 0xb1, 0x10), ('storage', 0xb2, 0x10), ('texture', 0xb3, 8), ('separate_texture', 0xb4, 8), ('separate_sampler', 0xb5, 8), ('image', 0xb6, 8),
+                ('acceleration', 0xb7, 8))
+CS_C0_DEVMSG = 0xb9
+CS_C0_SIZE = 0xba
+
+
+def compute_c0(ctl):
+    """A compute program's c0 layout (see CS_C0_HEADER): (total bytes, [(table, first slot or push block, byte offset, entries or words)]) in c0 order, tables named as in
+    CS_C0_TABLES plus 'push_block' and 'message'; None for a control that is not a compute stage packing its c0 (+0xa8 != 1). ValueError when the tables do not add up to +0xba"""
+    if stage(ctl) != 'cs' or ctl[0xa8] != 1: return None
+    off, rows = CS_C0_HEADER, []
+    for k in range(8):
+        n = ctl[CS_C0_PUSH + k]
+        if n: rows.append(('push_block', k, off, n)); off += (n + 3) // 4 * 16
+    for name, at, size in CS_C0_TABLES:
+        if ctl[at]: rows.append((name, 0, off, ctl[at])); off += ctl[at] * size
+    if ctl[CS_C0_DEVMSG]: rows.append(('message', 0, off, 1)); off += 0x10
+    total = struct.unpack_from('<H', ctl, CS_C0_SIZE)[0]
+    if off != total: raise ValueError(f'NVN2 compute c0 tables end at {off:#x}, control +0xba says {total:#x}')
+    return total, rows
 
 
 def _red(msg): raise SystemExit('[RED] ' + msg)

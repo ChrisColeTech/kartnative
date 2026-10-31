@@ -95,6 +95,18 @@ class Build(unittest.TestCase):
         self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
+    def test_nvn2_compute_c0_agrees(self):   # the driver's packed compute c0 as nvn2_shader.py reads it, and the json rows the build gives the host (dmsh_abi.h DMSH_C0P_KEY)
+        import nvn2_shader as nvn2
+        tree = ast.parse((REPO / 'dm/gfx/tools/dmsh_build.py').read_text())
+        body: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in {'TEX_BASE', 'C0P_TABLES'} for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t]))]
+        ns: dict[str, Any] = {'abi': abi}
+        exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
+        tables = ns['C0P_TABLES']
+        self.assertEqual(nvn2.CS_C0_HEADER, abi.C0P_HEADER)
+        self.assertEqual(set(tables), {t for t, _, _ in nvn2.CS_C0_TABLES} | {'push_block', 'message'})
+        for t, _, size in nvn2.CS_C0_TABLES: self.assertEqual(tables[t][2], size, t)
+        self.assertEqual(tables['separate_texture'][:2], (abi.KIND_TEX, abi.SEPTEX_SLOT0))
+
     def test_every_kind_is_written_by_the_build(self):
         src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()
         self.assertRegex(src, r'(?m)^import .*\bdmsh_abi as abi\b')

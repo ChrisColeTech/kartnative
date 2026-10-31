@@ -1,6 +1,7 @@
 """dmsh_build.py pool_arrays and reflect on synthetic MSL: Ryujinx's arrays for a handle traced to no slot, sized to the whole texture / sampler ID ranges (Program.cs), become pointers to
 the pools the replay keeps (nvn_mtl.m pool_gpu), declared with one element and read through a pointer to it with the run-time bound; the argument IDs are renumbered as the host lays the buffer out; 32-entry slot arrays stay; members with
-attributes after their id (raster_order_group) are read; a member or a use the rewrite cannot read stops the shader instead of leaving the host's argument buffer longer than the reflection."""
+attributes after their id (raster_order_group) are read; a member or a use the rewrite cannot read stops the shader instead of leaving the host's argument buffer longer than the reflection.
+An NVN2 compute program's handles and storage buffer addresses resolve to bind slots through its own packed c0 (nvn2_shader.compute_c0), which the reflection carries for the host."""
 import ast
 from pathlib import Path
 import re
@@ -12,8 +13,8 @@ TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # noqa: E402
 
-FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'c2_array', 'pool_arrays', 'reflect'}
-NAMES = {'POOL_MIN', 'TEX_BASE', 'SSBO'}
+FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'c2_array', 'pool_arrays', 'reflect', 'c0p_json', 'c0p_slot', 'decode_tex_c0p'}
+NAMES = {'POOL_MIN', 'TEX_BASE', 'SSBO', 'C0P_TABLES'}
 
 
 def load():
@@ -74,6 +75,17 @@ class Reflect(unittest.TestCase):
 
     def test_unreadable_member(self):
         with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': []})
+
+    def test_nvn2_compute_c0(self):   # Mario Kart World's 13-uniform layout: uniform 6 read through global memory, storage 1, texture 9 with its sampler, image 1
+        pack = (0x218, [('uniform', 0, 0x10, 13), ('storage', 0, 0xe0, 9), ('texture', 0, 0x170, 19), ('image', 0, 0x208, 2)])
+        msl = ('struct spvDescriptorSetBuffer0\n{\n    constant _16* cp_c0 [[id(0)]];\n    device _21* cp_s0 [[id(1)]];\n    device _21* cp_s1 [[id(2)]];\n'
+               '    texture2d<float> cp_t_cb0_6E [[id(3)]];\n    sampler cp_t_cb0_6ESmplr [[id(4)]];\n    texture2d<float, access::write> cp_i_cb0_84_r32f [[id(5)]];\n};\n')
+        res = {'sbufs': [{'binding': 0, 'cb_slot': 0, 'cb_offset': 0x70 // 4, 'flags': 0}, {'binding': 1, 'cb_slot': 0, 'cb_offset': 0xf0 // 4, 'flags': 1}]}
+        b = {e['msl_name']: (e['kind'], e.get('reg')) for e in NS['reflect']('k', 'cs', msl, res, pack)}
+        self.assertEqual(b, {'cp_c0': (abi.KIND_DRVCB, None), 'cp_s0': (abi.KIND_UBO_PTR, 6), 'cp_s1': (abi.KIND_SBUF, 1), 'cp_t_cb0_6E': (abi.KIND_TEX, 9),
+                             'cp_t_cb0_6ESmplr': (abi.KIND_SAMP_TEX, 9), 'cp_i_cb0_84_r32f': (abi.KIND_IMG, 1)})
+        self.assertEqual(NS['c0p_json'](pack), {'size': 0x218, 'rows': [[abi.KIND_CBUF, 0, 0x10, 13], [abi.KIND_SBUF, 0, 0xe0, 9], [abi.KIND_TEX, 0, 0x170, 19], [abi.KIND_IMG, 0, 0x208, 2]]})
+        self.assertIsNone(NS['decode_tex_c0p']('cp_t_cb0_6F', pack)[0], 'a word inside an entry is no slot')
 
 
 if __name__ == '__main__':

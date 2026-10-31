@@ -36,6 +36,17 @@
 #define DMSH_C0_SAMPLE_INFO 0x630        // pixel stage: the table's index words: sample index mask, log2 of the sample count, grid x mask (also the shift of y), grid y mask (Metroid Prime Remastered)
 #define DMSH_C0_BASE_INSTANCE 0x644      // graphics stages: the draw's base instance, which GLSLC adds to Maxwell's instance ID (Pokémon Legends: Z-A's occlusion boxes)
 
+// NVN2 compute c0: an SM86 compute program reads a c0 of its own layout, which NVN2's driver packs from the compute bind state at each dispatch (nvn2_shader.compute_c0, from
+// the program's control +0xa8..+0xbb). Its reflection json carries the layout as DMSH_C0P_KEY: {"size": bytes, "rows": [[kind, reg, offset, n], ...]}, and the host fills a buffer
+// of that size: the header, then per row, at its byte offset, n entries for the slots reg .. reg + n - 1 of the kind (the reg spaces of the bindings): DMSH_KIND_PUSH n words of push
+// block reg (nvnCommandBufferPushComputeConstants), zeros up to the next DMSH_C0_ROW; DMSH_KIND_CBUF uniform slots and DMSH_KIND_SBUF storage slots, DMSH_C0_ROW bytes each {u64
+// address, u32 size, u32 0}; DMSH_KIND_TEX texture slots (reg DMSH_SEPTEX_SLOT0 for the separate textures), DMSH_KIND_SAMP separate samplers and DMSH_KIND_IMG image slots,
+// DMSH_C0P_HANDLE bytes each: the 64-bit handle the game bound. A row of kind DMSH_KIND_UNKNOWN (acceleration structures, a device message buffer) cannot be filled: the host
+// refuses the shader. The program's bindings resolve to these slots (dmsh_build.py c0p_slot), so the host binds them like a graphics stage's
+#define DMSH_C0P_KEY "c0_pack"           // the reflection json member
+#define DMSH_C0P_HEADER 0x10             // bytes before the first row: u32 0, then the dispatch's workgroup counts x, y, z (the shader reads them at +4, +8, +0xc)
+#define DMSH_C0P_HANDLE 8                // bytes of a texture, separate texture, separate sampler or image entry
+
 // Binding kinds: the "kind" of each binding in a shader's <key>_b.json, as the build writes it and the host reads it (nvn_refl.m turns each into an NVN_RB_* code, nvn_refl.h)
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)

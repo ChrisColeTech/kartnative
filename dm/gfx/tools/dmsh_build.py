@@ -448,10 +448,15 @@ def sm86_code(rec):
     is the code area up to control +0x38: a graphics stage's 0x80-byte program header (a Maxwell SPH in its first 0x50 bytes) and its instructions, a compute stage's
     instructions only; c1 is the constant segment (control +0x40, +0x3c bytes: BRX tables). The 0xd8-byte NVN2 control section has none of the Switch 1 fields job_for
     reads (c1 at +0x700, transform feedback at +0x6dc, early fragment tests at +0x718); where NVN2 keeps the last two is not known yet, so neither is set"""
+    ctl, code = sm86_control(rec)
+    if ctl is None: return None
+    return nvn2.stage(ctl), code[:nvn2.control(ctl)['code_end']], nvn2.c1(ctl, code)
+
+def sm86_control(rec):
+    """(control section, code area) of a Switch 2 (NVN2) program's record, (None, None) for a Switch 1 one (sm86_code)"""
     nctl, ncode = struct.unpack_from('<2I', rec, 0x28)
     code, ctl = rec[0x38:0x38 + ncode], rec[0x38 + ncode:0x38 + ncode + nctl]
-    if not nvn2.is_control(ctl): return None
-    return nvn2.stage(ctl), code[:nvn2.control(ctl)['code_end']], nvn2.c1(ctl, code)
+    return (ctl, code) if nvn2.is_control(ctl) else (None, None)
 
 def job_for(key, name, rec, w):
     sm86 = sm86_code(rec)
@@ -610,6 +615,37 @@ def const_sampler(name):
     h = int(m.group(2), 16)
     return (h >> 14) & 0x3fff if h >> 28 == 3 else None
 
+# NVN2 compute c0 (dmsh_abi.h DMSH_C0P_KEY, nvn2_shader.compute_c0): the program reads its bindings' addresses and handles from a c0 of its own layout, entry i of a table being bind
+# slot i of its kind. The tables by nvn2_shader's names: (binding kind of the json rows, first reg, entry bytes); a table the host cannot fill is DMSH_KIND_UNKNOWN
+C0P_TABLES = {'push_block': (abi.KIND_PUSH, 0, 4), 'uniform': (abi.KIND_CBUF, 0, abi.C0_ROW), 'storage': (abi.KIND_SBUF, 0, abi.C0_ROW), 'texture': (abi.KIND_TEX, 0, abi.C0P_HANDLE),
+              'separate_texture': (abi.KIND_TEX, SEPTEX_SLOT0, abi.C0P_HANDLE), 'separate_sampler': (abi.KIND_SAMP, 0, abi.C0P_HANDLE), 'image': (abi.KIND_IMG, 0, abi.C0P_HANDLE),
+              'acceleration': (abi.KIND_UNKNOWN, 0, abi.C0P_HANDLE), 'message': (abi.KIND_UNKNOWN, 0, abi.C0_ROW)}
+
+def c0p_json(pack):
+    """The reflection's DMSH_C0P_KEY member of a compute_c0 layout: {size, rows: [[kind, reg, byte offset, entries (push: words)]]}"""
+    total, rows = pack
+    return {'size': total, 'rows': [[C0P_TABLES[t][0], C0P_TABLES[t][1] + first, off, n] for t, first, off, n in rows]}
+
+def c0p_slot(pack, off, tables):
+    """(table, reg) of the entry that starts at byte off of a packed compute c0 (nvn2_shader.compute_c0), among the named tables (separate texture r: SEPTEX_SLOT0 + r); None elsewhere"""
+    for t, first, o, n in pack[1]:
+        size = C0P_TABLES[t][2]
+        if t in tables and o <= off < o + n * size and (off - o) % size == 0: return t, C0P_TABLES[t][1] + first + (off - o) // size
+    return None
+
+def decode_tex_c0p(name, pack):
+    """decode_tex for an NVN2 compute program, whose handles are in its packed c0 (cp_t_cb0_1E: the texture handle at c0 word 0x1E): (texture slot, sampler slot, handle type)
+    with separate textures at slot SEPTEX_SLOT0 + r as in c2; None for a handle in another bank"""
+    m = re.match(r'[a-z]+_[ti]\w*?_cb(\d+)_([0-9A-F]+)', name)
+    if not m or int(m.group(1)) & 0xffff or int(m.group(1)) >> 16 > 1: return None   # texture and any separate sampler word in bank 0
+    h = int(m.group(2), 16)
+    o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
+    words = [o0] + ([o1] if ty else [])
+    if re.match(r'[a-z]+_i', name): return next((c[1] for x in words if (c := c0p_slot(pack, x * 4, ('image',)))), None), None, ty
+    t = next((c[1] for x in ([o0] if ty == 3 else words) if (c := c0p_slot(pack, x * 4, ('texture', 'separate_texture')))), None)
+    s = next((c[1] for x in words if (c := c0p_slot(pack, x * 4, ('separate_sampler',)))), None) if ty != 3 else None
+    return t, s, ty
+
 def decode_ubo_tex(name):
     """Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
     handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)
@@ -680,8 +716,10 @@ def pool_arrays(src):
         if left: raise ValueError(f'{nm}: {left} uses of the pool array the rewrite does not cover')
     return src
 
-def reflect(key, stage, msl, res):
-    """MSL argument buffer struct member → replay reflection: kind (same as nvn_refl.h) + NVN slot number + argument buffer member index"""
+def reflect(key, stage, msl, res, pack=None):
+    """MSL argument buffer struct member → replay reflection: kind (same as nvn_refl.h) + NVN slot number + argument buffer member index. pack: an NVN2 compute program's c0 layout
+    (nvn2_shader.compute_c0), where its handles and storage buffer addresses are (decode_tex_c0p, c0p_slot)"""
+    def dt(n): return (pack and decode_tex_c0p(n, pack)) or decode_tex(n)
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', msl, re.S)
     sb_cb = {b['binding']: b for b in res['sbufs']}
     binds = []
@@ -715,9 +753,9 @@ def reflect(key, stage, msl, res):
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
             e.update(kind=abi.KIND_SAMP_C2A if nm.endswith('Smplr') else abi.KIND_TEX_C2A, off=off, **({'soff': soff} if soff is not None else {}))
         elif nm.endswith('Smplr'):   # handle type 0 = texture and sampler combined in one handle: the sampler index is taken from the high bits of that texture slot's handle
-            t, s, ty = decode_tex(nm[:-5]); e.update(kind=abi.KIND_SAMP_ID, reg=const_sampler(nm[:-5])) if ty == 3 else e.update(kind=abi.KIND_SAMP, reg=s) if ty else e.update(kind=abi.KIND_SAMP_TEX, reg=t)
+            t, s, ty = dt(nm[:-5]); e.update(kind=abi.KIND_SAMP_ID, reg=const_sampler(nm[:-5])) if ty == 3 else e.update(kind=abi.KIND_SAMP, reg=s) if ty else e.update(kind=abi.KIND_SAMP_TEX, reg=t)
         else:
-            d = decode_tex(nm)
+            d = dt(nm)
             if not d: e.update(kind=abi.KIND_UNKNOWN)
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
@@ -734,7 +772,11 @@ def reflect(key, stage, msl, res):
         if e['kind'] == abi.KIND_SBUF:
             b = sb_sorted[e['index']] if e['index'] < len(sb_sorted) else None
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
-            if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
+            c = c0p_slot(pack, off, ('uniform', 'storage')) if pack and off is not None else None
+            if pack and b and b['cb_slot'] == 0:   # NVN2 compute: uniform slot r read through global memory (ubo_ptr) or storage slot r, by the program's own c0
+                if c and c[0] == 'uniform': e.update(kind=abi.KIND_UBO_PTR, reg=c[1])
+                else: e['reg'] = c[1] if c else None
+            elif stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
@@ -1175,7 +1217,10 @@ def finish(key, w, j, c1):
     clone(msl, os.path.join(out, key + '_b.metal'))
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
-    try: binds = reflect(key, j['stage'], src, res)
+    try:
+        ctl = sm86_control(recs[key][1])[0]
+        pack = nvn2.compute_c0(ctl) if ctl is not None else None   # an NVN2 compute program's own c0 layout (abi.C0P_KEY), from its control section
+        binds = reflect(key, j['stage'], src, res, pack)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
@@ -1183,7 +1228,7 @@ def finish(key, w, j, c1):
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
-            'bindings': binds,
+            'bindings': binds, **({abi.C0P_KEY: c0p_json(pack)} if pack else {}),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
