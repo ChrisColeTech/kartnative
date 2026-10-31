@@ -1148,7 +1148,10 @@ for a in sorted(kinds):
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
-        elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
+        # A pointer-authenticated branch (braa / brab / blraa / blrab and their z forms, Armv8.3) naming x18 as its target or modifier would leave site_plain's copy with the
+        # scratch registers it borrowed (and blraa's return in the patch area): none of the Switch 2 modules on hand has one (Mario Kart World 1.0.0's main, sdk and subsdk0
+        # authenticate only through retab and pacib / xpaci), so it stops the rewrite instead of being rewritten wrongly. ldraa / ldrab with x18 are loads and go to site_plain
+        elif m in ('ret', 'b', 'bl') or m.startswith(('bra', 'blra')) or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
     elif k == 'tpidrro_r': st = site_sysreg_read(ins, 'KTLR'); stat(k)
