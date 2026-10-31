@@ -20,9 +20,19 @@ namespace Ryujinx.Graphics.Shader.Sm86
         private const int RoundDown = 1;
         private const int RoundUp = 2;
 
+        /// <summary>A variant the emitter cannot translate: the chain drops the program ("is not implemented", shaders-sm86.md).</summary>
         private static void LogNotImplemented(EmitterContext context, string what)
         {
             context.TranslatorContext.GpuAccessor.Log($"SM86 {what} at 0x{context.CurrOp.Address:X} is not implemented.");
+        }
+
+        /// <summary>
+        /// A narrowing conversion with a directed rounding, which the IR cannot express: it rounds to nearest even (at most one unit in the last place
+        /// apart) and the program still runs, so the note avoids the words that drop it.
+        /// </summary>
+        private static void LogRoundedToNearest(EmitterContext context, string what)
+        {
+            context.TranslatorContext.GpuAccessor.Log($"SM86 {what} at 0x{context.CurrOp.Address:X}: directed rounding of a narrowing conversion approximated by nearest even.");
         }
 
         /// <summary>
@@ -346,7 +356,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
             {
                 if (mode != RoundNearest && srcSize > 0)
                 {
-                    LogNotImplemented(context, "I2F to F16 with a directed rounding (rounded to nearest)");
+                    LogRoundedToNearest(context, "I2F to F16");
                 }
 
                 res = context.PackHalf2x16(res, ConstF(0));
@@ -500,7 +510,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
             if (dstSize < srcSize && inst.Field(78, 2) != RoundNearest)
             {
-                LogNotImplemented(context, "F2F narrowing with a directed rounding (rounded to nearest)");
+                LogRoundedToNearest(context, "F2F");
             }
 
             Operand value = ConvFloatSrc(context, inst, srcSize, out Instruction fpType);
@@ -522,7 +532,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
             if (inst.Field(79, 2) != RoundNearest)
             {
-                LogNotImplemented(context, "F2FP with a directed rounding (rounded to nearest)");
+                LogRoundedToNearest(context, "F2FP");
             }
 
             Operand low = Src(context, inst, Slot.B);
