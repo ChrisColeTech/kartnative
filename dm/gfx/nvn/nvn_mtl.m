@@ -9958,19 +9958,25 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
-    if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
+    if (!S.cprog) { PD("Y dispatch skipped: no program bound"); RED_ONCE(27, "no program bound before the dispatch"); return; }
     // DispatchComputeIndirect: the group counts {x, y, z} at ind (MTLDispatchThreadgroupsIndirectArguments) are usually written by the GPU earlier in the frame; Metal reads them when the dispatch runs
     void *ib = NULL; uint64_t io = 0, ig = 0;
     if (dp->ind && !mtl_gpu_addr(dp->ind, 12, &ib, &io, &ig)) { RED_ONCE(94, "indirect dispatch skipped: argument address %#llx is in no memory pool", (unsigned long long)dp->ind); return; }
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
-    if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    // DM_NVN_PASSDUMP: each dispatch with its compute shader and group counts (an indirect one: the address the GPU reads them from), or why it was dropped
+    if (!cs) { if (passdump()) { uint8_t md[8] = {0}; if (S.cprog->nstage) prog_key(S.cprog, 0, md);
+            PD("Y dispatch skipped: program %p (first stage %02x%02x%02x%02x%02x%02x%02x%02x) has no loaded compute shader", (void *)S.cprog, md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]); }
+        RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    if (dp->ind) PD("Y dispatch cs=%s indirect=%#llx", cs->key[0] ? cs->key : cs->builtin ? cs->builtin : "-", (unsigned long long)dp->ind);
+    else PD("Y dispatch cs=%s groups=%d,%d,%d", cs->key[0] ? cs->key : cs->builtin ? cs->builtin : "-", (int)dp->x, (int)dp->y, (int)dp->z);
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
-    if (!ps) {
+    if (!ps) {   // a shader Metal refused (logged bit 16) is not built again at every dispatch: Mario Kart World dispatched one 66,973 times in a run, each a failed compile
+        if (cs->logged & 16) { PD("Y dispatch skipped: no compute pipeline for %s", cs->key); return; }
         NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { MLOG("[RED] failed to create compute pipeline: %s", e.localizedDescription.UTF8String); return; }
+        if (!ps) { cs->logged |= 16; MLOG("[RED] failed to create the compute pipeline of shader %s (its dispatches are skipped): %s", cs->key[0] ? cs->key : cs->builtin ? cs->builtin : "-", e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
         hm_put_id(&g_cps, &k, ps);
