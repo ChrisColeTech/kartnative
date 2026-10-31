@@ -1238,9 +1238,10 @@ for key in keys:
     else: jobs[key], c1s[key] = job_for(key, name, rec, w)
 misses = [key for key in keys if key not in cache_hits and key not in untranslated]
 # An SM86 program the translator could not translate whole: the frontend logs an instruction it has no emitter for, or a variant its emitter does not implement, and emits
-# nothing for it (docs/reference/shaders-sm86.md); BRX targets or a call target it cannot find leave the control flow wrong. Such a program gets no library: drawn with
-# instructions missing it would render wrong. Its items (opcode or variant, addresses left out) feed the summary's histogram. Other SM86 notes are approximations and are kept
-SM86_BLOCKING = re.compile(r'Unsupported SM86 instruction|is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at')
+# nothing for it (docs/reference/shaders-sm86.md); BRX targets or a call target it cannot find leave the control flow wrong, and a global memory access through a pointer
+# no storage buffer slot gives (GlobalToStorage) is dropped. Such a program gets no library: drawn with instructions missing it would render wrong. Its items (opcode or
+# variant, addresses left out) feed the summary's histogram. Other SM86 notes are approximations and are kept
+SM86_BLOCKING = re.compile(r'Unsupported SM86 instruction|is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at|Failed to find storage buffer for global memory operation')
 def sm86_blockers(notes):
     items = set()
     for n in notes:
