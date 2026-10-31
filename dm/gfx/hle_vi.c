@@ -71,8 +71,8 @@ HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the ho
     p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
     return 1;
 }
-// Switch 2 SDK (Mario Kart World, SDK 19.3.3): the display's HDR and VRR queries and the layer's HDR metadata and extended swap interval. The SDK's versions check the
-// display against its own vi2 object (sdk+0x536710: anything else answers 0x272) and call through the vi2 service the host never made. The host presents in SDR (BT.709,
+// Switch 2 SDK (Mario Kart World, SDK 19.3.3): the display's HDR and VRR queries and the layer's HDR metadata and extended swap interval. The SDK's display queries check
+// the display against their own vi2 object (sdk+0x536710: the host's display gets 0x272 and the outputs stay unwritten); the layer functions call into the vi2 service the host never made. The host presents in SDR (BT.709,
 // 8-bit window textures) on a fixed-rate display, so it answers no HDR and no VRR; MKW queries both from its display object (main+0x226ce40, main+0x226cdcc).
 //   QueryDisplayHdrStatus(bool *enabled, HdrOutputFormat *format, u16 *max luminance, display): HDR off, format 0; MKW keeps min(max luminance, its own limit) beside
 //   the paper white (QueryDisplayHdrPaperWhite, scaled by a float of its own). With HDR off it does not output in those units [INFERENCE: it switches its window format only with
