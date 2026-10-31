@@ -114,6 +114,29 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// nxnative: the ISBE regions of an SM86 task or mesh program (TranslationFlags.Sm86Task / Sm86Mesh), which the translation keeps in shared memory:
+        /// the output attribute region in bytes (a mesh program's per-vertex and per-primitive attribute lines, a task program's output with its payload),
+        /// the output map region's entries (a mesh program's primitive count and 8-bit vertex indices, one 32-bit entry per byte address) and the input
+        /// attribute region in bytes (the workgroup index at 0, then the task payload a mesh program reads).
+        /// </summary>
+        int QuerySm86IsbeOutputSize()
+        {
+            return 0;
+        }
+
+        /// <inheritdoc cref="QuerySm86IsbeOutputSize"/>
+        int QuerySm86IsbeMapEntries()
+        {
+            return 0;
+        }
+
+        /// <inheritdoc cref="QuerySm86IsbeOutputSize"/>
+        int QuerySm86IsbeInputSize()
+        {
+            return 0;
+        }
+
+        /// <summary>
         /// Queries Constant Buffer usage information.
         /// </summary>
         /// <returns>A mask where each bit set indicates a bound constant buffer</returns>

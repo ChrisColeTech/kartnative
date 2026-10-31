@@ -44,6 +44,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 program = sm86 ? Sm86Decoder.Decode(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
             }
+            else if (sm86 && (options.Flags & (TranslationFlags.Sm86Task | TranslationFlags.Sm86Mesh)) != 0)
+            {
+                // nxnative: an NVN2 task or mesh program runs as a workgroup of the compute local size (control +0x58); its header gives the local memory size.
+                definitions = CreateComputeDefinitions(gpuAccessor);
+                localMemorySize = GetLocalMemorySize(new ShaderHeader(gpuAccessor, address));
+
+                program = Sm86Decoder.Decode(definitions, gpuAccessor, address + (ulong)headerSize);
+            }
             else
             {
                 ShaderHeader header = new(gpuAccessor, address);

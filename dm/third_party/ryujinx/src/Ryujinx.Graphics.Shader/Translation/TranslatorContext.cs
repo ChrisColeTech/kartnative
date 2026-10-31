@@ -207,6 +207,11 @@ namespace Ryujinx.Graphics.Shader.Translation
                 resourceManager.SetCurrentSharedMemory(GpuAccessor.QueryComputeSharedMemorySize(), usesSharedMemory);
             }
 
+            if ((Options.Flags & (TranslationFlags.Sm86Task | TranslationFlags.Sm86Mesh)) != 0)
+            {
+                resourceManager.SetSm86IsbeMemories(GpuAccessor.QuerySm86IsbeOutputSize(), GpuAccessor.QuerySm86IsbeMapEntries(), GpuAccessor.QuerySm86IsbeInputSize());
+            }
+
             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: true, out _);
 
             return Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);

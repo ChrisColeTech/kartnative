@@ -65,6 +65,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                 context.AddGlobalVariable(variable);
 
+                // nxnative: an SM86 task / mesh program's ISBE regions (ResourceManager.SetSm86IsbeMemories) keep their names, which dmsh_mesh.py looks for
+                // in the MSL; other memories stay unnamed, so their output is unchanged.
+                if (memory.Name.StartsWith("isbe_"))
+                {
+                    context.Name(variable, memory.Name);
+                }
+
                 dict.Add(id, variable);
             }
         }

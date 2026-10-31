@@ -18,5 +18,9 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
 
 - `Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs`: without DebugMode, constants and expressions are no longer propagated into call arguments (SPIR-V passes them by pointer; code generation failed with `KeyNotFoundException`, e.g. every SHFL with an immediate lane), and a call is not moved into the use of its result when one of its out arguments is read later. `Instructions/InstEmitWarp.cs` (`EmitVote`, `EmitBallot`) and `InstEmitMemory.cs` (`EmitLoad`, `EmitStore`, `EmitAtomicOp`) are internal for the SM86 emitters. See [SM86 shaders](../../../docs/reference/shaders-sm86.md).
 
+- Task and mesh programs of the SM86 frontend: `Sm86/Sm86Emit.Isbe.cs` (ISBERD / ISBEWR), `Translation/TranslationFlags.cs` (`Sm86Task`, `Sm86Mesh`), `Translation/Translator.cs` (`DecodeShader`: such a program is a compute stage decoded after its header), `IGpuAccessor.cs` (`QuerySm86IsbeOutputSize`, `QuerySm86IsbeMapEntries`, `QuerySm86IsbeInputSize`, default 0), `Translation/ResourceManager.cs` (`SetSm86IsbeMemories`) and `Translation/TranslatorContext.cs` (`Translate`): the ISBE regions are shared memories, which `CodeGen/Spirv/Declarations.cs` names (only those: other memories stay unnamed). Every addition is behind the two flags; Maxwell output and the other SM86 programs' SPIR-V are unchanged. See [Task and mesh programs](../../../docs/reference/shaders-sm86.md#task-and-mesh-programs).
+
+- `Translation/Optimizations/GlobalToStorage.cs` (`FindUniqueBaseAddressCb`): with two constant-buffer operands the driver-reserved bank is the base whenever only one of them is it (Switch 2 compute programs add a c1 constant to a c0 storage address).
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.

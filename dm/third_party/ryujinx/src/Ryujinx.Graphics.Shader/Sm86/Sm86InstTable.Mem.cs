@@ -23,6 +23,9 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("AST", 0x322, Sm86Emit.Ast, Sm86InstProps.AttrStore);
             Add("IPA", 0x326, Sm86Emit.Ipa, Rd | Sm86InstProps.Ipa);
             Add("IPA", 0x526, Sm86Emit.Ipa, Rd | Sm86InstProps.Ipa);
+            // Task and mesh programs' ISBE accesses (Sm86Emit.Isbe.cs)
+            Add("ISBERD", 0x923, Sm86Emit.Isberd, Rd);
+            Add("ISBEWR", 0x927, Sm86Emit.Isbewr);
 
             Add("LDG", 0x981, Sm86Emit.Ldg, Rd);
             Add("LDG", 0x381, Sm86Emit.Ldg, Rd);

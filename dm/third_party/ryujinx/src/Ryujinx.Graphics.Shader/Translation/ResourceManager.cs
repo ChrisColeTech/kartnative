@@ -46,6 +46,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         public int LocalMemoryId { get; private set; }
         public int SharedMemoryId { get; private set; }
 
+        // nxnative: the ISBE regions of an SM86 task or mesh program as shared memories (SetSm86IsbeMemories); -1 elsewhere
+        public int IsbeOutputId { get; private set; } = -1;
+        public int IsbeMapId { get; private set; } = -1;
+        public int IsbeInputId { get; private set; } = -1;
+
         public int LocalVertexDataMemoryId { get; private set; }
         public int LocalTopologyRemapMemoryId { get; private set; }
         public int LocalVertexIndexVertexRateMemoryId { get; private set; }
@@ -123,6 +128,18 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 SharedMemoryId = -1;
             }
+        }
+
+        /// <summary>
+        /// nxnative: an SM86 task or mesh program's ISBE regions (IGpuAccessor.QuerySm86IsbeOutputSize): isbe_out (output attributes, bytes / 4 words),
+        /// isbe_map (one word per output map byte address, mesh only) and isbe_in (input attributes). Shared memories so that every invocation of the
+        /// workgroup reads and writes them, as the hardware's ISBE; dm/gfx/tools/dmsh_mesh.py fills isbe_in and reads the outputs around the kernel.
+        /// </summary>
+        public void SetSm86IsbeMemories(int outputBytes, int mapEntries, int inputBytes)
+        {
+            IsbeOutputId = Properties.AddSharedMemory(new MemoryDefinition("isbe_out", AggregateType.Array | AggregateType.U32, Math.Max(1, BitUtils.DivRoundUp(outputBytes, sizeof(uint)))));
+            IsbeMapId = mapEntries > 0 ? Properties.AddSharedMemory(new MemoryDefinition("isbe_map", AggregateType.Array | AggregateType.U32, mapEntries)) : -1;
+            IsbeInputId = Properties.AddSharedMemory(new MemoryDefinition("isbe_in", AggregateType.Array | AggregateType.U32, Math.Max(1, BitUtils.DivRoundUp(inputBytes, sizeof(uint)))));
         }
 
         public void SetVertexAsComputeLocalMemories(ShaderStage stage, InputTopology inputTopology)
