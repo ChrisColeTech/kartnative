@@ -499,6 +499,335 @@ namespace Ryujinx.Graphics.Shader.Sm86
             }
         }
 
+        /// <summary>The B source of a bit operation (FLO, POPC), inverted with bit 63 when B is not an immediate (whose bits 32-63 are all value).</summary>
+        private static Operand NotSrcB(EmitterContext context, Sm86Inst inst)
+        {
+            return context.BitwiseNot(Src(context, inst, Slot.B), inst.Form != 4 && inst.Bit(63));
+        }
+
+        /// <summary>IABS / UIABS d = |B| (|INT_MIN| = INT_MIN); semantics: NAK's hardware-tested fold (OpIAbs).</summary>
+        public static void Iabs(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "IABS", 0);
+            SetDest(context, inst, context.IAbsolute(Src(context, inst, Slot.B)));
+        }
+
+        /// <summary>
+        /// FLO / UFLO d = the position of the most significant bit of B (inverted with bit 63) that differs from the sign bit when signed (bit 73), or
+        /// with .SH (bit 74) its distance from bit 31. No such bit gives 0xffffffff in both forms (PTX bfind); otherwise as NAK's hardware-tested fold.
+        /// </summary>
+        public static void Flo(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "FLO", ModMask(73, 74, 81, 82, 83));
+
+            if (inst.Field(81, 3) != RegisterConsts.PredicateTrueIndex)
+            {
+                LogNotImplemented(context, "FLO predicate output");
+            }
+
+            Operand src = NotSrcB(context, inst);
+            Operand msb = inst.Bit(73) ? context.FindMSBS32(src) : context.FindMSBU32(src);
+
+            if (inst.Bit(74))
+            {
+                msb = context.ConditionalSelect(context.ICompareLess(msb, Const(0)), msb, context.ISubtract(Const(31), msb));
+            }
+
+            SetDest(context, inst, msb);
+        }
+
+        /// <summary>POPC / UPOPC d = the number of set bits of B, inverted with bit 63 (NAK's hardware-tested fold).</summary>
+        public static void Popc(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "POPC", 0);
+            SetDest(context, inst, context.BitCount(NotSrcB(context, inst)));
+        }
+
+        /// <summary>BREV / UBREV d = B with its bits reversed.</summary>
+        public static void Brev(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "BREV", 0);
+            SetDest(context, inst, context.BitfieldReverse(Src(context, inst, Slot.B)));
+        }
+
+        /// <summary>
+        /// SGXT / USGXT d = A's low B bits, sign-extended (bit 73) or zero-extended to 32 bits. B is clamped to 32 or, with .W (bit 75), taken modulo 32;
+        /// 0 bits give 0, 32 give A (NAK's hardware-tested fold, OpSgxt).
+        /// </summary>
+        public static void Sgxt(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "SGXT", ModMask(73, 75));
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand bits = Src(context, inst, Slot.B);
+
+            bits = inst.Bit(75) ? context.BitwiseAnd(bits, Const(31)) : context.IMinimumU32(bits, Const(32));
+
+            Operand shift = context.BitwiseAnd(context.ISubtract(Const(32), bits), Const(31));
+            Operand up = context.ShiftLeft(a, shift);
+            Operand res = inst.Bit(73) ? context.ShiftRightS32(up, shift) : context.ShiftRightU32(up, shift);
+
+            SetDest(context, inst, context.ConditionalSelect(context.ICompareEqual(bits, Const(0)), Const(0), res));
+        }
+
+        /// <summary>
+        /// BMSK / UBMSK d = a mask of B ones starting at bit A: both clamped to 32 or, with .W (bit 75), taken modulo 32; bits past 31 are dropped (PTX
+        /// bmsk). Not in MKW.
+        /// </summary>
+        public static void Bmsk(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "BMSK", ModMask(75));
+
+            Operand pos = Src(context, inst, Slot.A);
+            Operand width = Src(context, inst, Slot.B);
+
+            if (inst.Bit(75))
+            {
+                pos = context.BitwiseAnd(pos, Const(31));
+                width = context.BitwiseAnd(width, Const(31));
+            }
+            else
+            {
+                pos = context.IMinimumU32(pos, Const(32));
+                width = context.IMinimumU32(width, Const(32));
+            }
+
+            Operand ones = context.ConditionalSelect(
+                context.ICompareEqual(width, Const(32)),
+                Const(-1),
+                context.ISubtract(context.ShiftLeft(Const(1), context.BitwiseAnd(width, Const(31))), Const(1)));
+            Operand res = context.ShiftLeft(ones, context.BitwiseAnd(pos, Const(31)));
+
+            SetDest(context, inst, context.ConditionalSelect(context.ICompareEqual(pos, Const(32)), Const(0), res));
+        }
+
+        /// <summary>
+        /// LEA / ULEA d = (A &lt;&lt; shift) + B, shift in bits 75-79. .HI (bit 80) shifts the 64-bit C:A (A sign-extended instead with .SX32, bit 73)
+        /// and keeps its high word. The shifted value is negated with bit 72 and B with its slot's neg bit (none in forms 2, 3 and 7, where bit 75 is the
+        /// shift); the carry out (the exact sum's bit 32, a negation of 0 carrying) goes to bits 81-83. .X (bit 74) adds the carry-in predicate (bits
+        /// 87-90), and its modifier bits invert instead of negate. Semantics: NAK's hardware-tested folds (OpLea, OpLeaX).
+        /// </summary>
+        public static void Lea(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+            bool uniform = IsUniform(inst);
+            bool extended = inst.Bit(74);
+            int shift = inst.Field(75, 5);
+            int carryOut = inst.Field(81, 3);
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand b = Src(context, inst, Slot.B);
+            Operand shifted;
+
+            if (inst.Bit(80))
+            {
+                Operand high = inst.Bit(73) ? context.ShiftRightS32(a, Const(31)) : Src(context, inst, Slot.C);
+
+                shifted = shift == 0 ? high : context.BitwiseOr(context.ShiftRightU32(a, Const(32 - shift)), context.ShiftLeft(high, Const(shift)));
+            }
+            else
+            {
+                if (inst.Bit(73))
+                {
+                    LogNotImplemented(context, "LEA.SX32 without .HI");
+                }
+
+                shifted = context.ShiftLeft(a, Const(shift));
+            }
+
+            bool negShifted = inst.Bit(72);
+            bool negB = inst.Form is 1 or 5 or 6 && inst.Bit(63);
+
+            if (!extended && carryOut == RegisterConsts.PredicateTrueIndex)
+            {
+                SetDest(context, inst, context.IAdd(context.INegate(shifted, negShifted), context.INegate(b, negB)));
+                return;
+            }
+
+            var terms = new List<Operand>
+            {
+                context.BitwiseNot(shifted, negShifted),
+                context.BitwiseNot(b, negB),
+            };
+
+            if (extended)
+            {
+                terms.Add(PredAsInt(context, PredSrc(context, inst.Pred87, inst.Pred87Inv, uniform)));
+            }
+            else if (negShifted || negB)
+            {
+                terms.Add(Const((negShifted ? 1 : 0) + (negB ? 1 : 0)));
+            }
+
+            Operand sum = SumWithCarries(context, terms, out Operand carries);
+
+            SetDest(context, inst, sum);
+            SetPredDest(context, carryOut, context.ICompareNotEqual(carries, Const(0)), uniform);
+        }
+
+        /// <summary>
+        /// PRMT / UPRMT d = 4 bytes picked from the pair C:A (bytes 0-3 from A, 4-7 from C) by the selector B and the mode in bits 72-74. Mode 0
+        /// (index): result byte i takes B's nibble i, bits 0-2 the byte and bit 3 to replicate that byte's sign (NAK's hardware-tested fold). Modes
+        /// 1-6 (f4e, b4e, rc8, ecl, ecr, rc16) use B's bits 0-1 as PTX prmt. A constant selector (every MKW PRMT) becomes shifts and masks.
+        /// </summary>
+        public static void Prmt(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+            int mode = inst.Field(72, 3);
+
+            CheckModifiers(context, inst, "PRMT", ModMask(72, 73, 74));
+
+            if (mode == 7)
+            {
+                LogNotImplemented(context, "PRMT mode 7");
+                return;
+            }
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand sel = Src(context, inst, Slot.B);
+            Operand c = Src(context, inst, Slot.C);
+
+            SetDest(context, inst, sel.Type == OperandType.Constant
+                ? PermuteStatic(context, a, c, sel.Value, mode)
+                : PermuteDynamic(context, a, c, sel, mode));
+        }
+
+        /// <summary>The byte index (0-7 of C:A) a non-index PRMT mode gives result byte <paramref name="i"/> for selector bits <paramref name="n"/>.</summary>
+        private static int PrmtModeIndex(int mode, int n, int i)
+        {
+            return mode switch
+            {
+                1 => (n + i) & 7,
+                2 => (n - i) & 7,
+                3 => n,
+                4 => Math.Max(i, n),
+                5 => Math.Min(i, n),
+                _ => (n & 1) * 2 + (i & 1),
+            };
+        }
+
+        private static Operand PermuteStatic(EmitterContext context, Operand a, Operand c, int sel, int mode)
+        {
+            Operand res = null;
+
+            void Or(Operand part) => res = res == null ? part : context.BitwiseOr(res, part);
+
+            int i = 0;
+
+            while (i < 4)
+            {
+                int nibble = mode == 0 ? (sel >> (i * 4)) & 0xf : PrmtModeIndex(mode, sel & 3, i);
+                int index = nibble & 7;
+                Operand src = index < 4 ? a : c;
+                int srcByte = index & 3;
+
+                if ((nibble & 8) != 0)
+                {
+                    // The byte's sign, replicated over the result byte.
+                    Operand sign = context.ShiftRightS32(context.ShiftLeft(src, Const(24 - srcByte * 8)), Const(31));
+
+                    Or(context.BitwiseAnd(sign, Const(0xff << (i * 8))));
+                    i++;
+                    continue;
+                }
+
+                // A run of result bytes that come from consecutive bytes of the same source moves with one shift.
+                int count = 1;
+
+                while (i + count < 4)
+                {
+                    int next = mode == 0 ? (sel >> ((i + count) * 4)) & 0xf : PrmtModeIndex(mode, sel & 3, i + count);
+
+                    if ((next & 8) != 0 || (next & 4) != (index & 4) || (next & 3) != srcByte + count)
+                    {
+                        break;
+                    }
+
+                    count++;
+                }
+
+                int delta = (i - srcByte) * 8;
+                Operand moved = delta > 0 ? context.ShiftLeft(src, Const(delta)) : delta < 0 ? context.ShiftRightU32(src, Const(-delta)) : src;
+                uint mask = (count == 4 ? uint.MaxValue : (1u << (count * 8)) - 1) << (i * 8);
+
+                Or(mask == uint.MaxValue ? moved : context.BitwiseAnd(moved, Const((int)mask)));
+                i += count;
+            }
+
+            return res;
+        }
+
+        private static Operand PermuteDynamic(EmitterContext context, Operand a, Operand c, Operand sel, int mode)
+        {
+            Operand res = Const(0);
+            Operand n = context.BitwiseAnd(sel, Const(3));
+
+            for (int i = 0; i < 4; i++)
+            {
+                Operand nibble = mode switch
+                {
+                    0 => context.BitwiseAnd(context.ShiftRightU32(sel, Const(i * 4)), Const(0xf)),
+                    1 => context.BitwiseAnd(context.IAdd(n, Const(i)), Const(7)),
+                    2 => context.BitwiseAnd(context.ISubtract(n, Const(i)), Const(7)),
+                    3 => n,
+                    4 => context.IMaximumU32(n, Const(i)),
+                    5 => context.IMinimumU32(n, Const(i)),
+                    _ => context.IAdd(context.ShiftLeft(context.BitwiseAnd(n, Const(1)), Const(1)), Const(i & 1)),
+                };
+
+                Operand src = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(nibble, Const(4)), Const(0)), c, a);
+                Operand position = context.ShiftLeft(context.BitwiseAnd(nibble, Const(3)), Const(3));
+                Operand value = context.BitfieldExtractU32(src, position, Const(8));
+
+                if (mode == 0)
+                {
+                    Operand sign = context.BitwiseAnd(context.BitfieldExtractS32(src, context.IAdd(position, Const(7)), Const(1)), Const(0xff));
+
+                    value = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(nibble, Const(8)), Const(0)), sign, value);
+                }
+
+                res = context.BitwiseOr(res, context.ShiftLeft(value, Const(i * 8)));
+            }
+
+            return res;
+        }
+
+        /// <summary>
+        /// IDP.4A d = the dot product of A's and B's four bytes (signed with bits 73 and 74) + C (PTX dp4a; NAK OpIDp4). Not in MKW.
+        /// </summary>
+        public static void Idp4a(EmitterContext context)
+        {
+            Sm86Inst inst = Inst(context);
+
+            CheckModifiers(context, inst, "IDP.4A", ModMask(73, 74));
+
+            Operand a = Src(context, inst, Slot.A);
+            Operand b = Src(context, inst, Slot.B);
+            Operand res = Src(context, inst, Slot.C);
+
+            for (int i = 0; i < 4; i++)
+            {
+                Operand ab = inst.Bit(73) ? context.BitfieldExtractS32(a, Const(i * 8), Const(8)) : context.BitfieldExtractU32(a, Const(i * 8), Const(8));
+                Operand bb = inst.Bit(74) ? context.BitfieldExtractS32(b, Const(i * 8), Const(8)) : context.BitfieldExtractU32(b, Const(i * 8), Const(8));
+
+                res = context.IAdd(res, context.IMultiply(ab, bb));
+            }
+
+            SetDest(context, inst, res);
+        }
+
         /// <summary>Writes a P (or, uniform, UP) destination; index 7 (PT) discards the value.</summary>
         public static void SetPredDest(EmitterContext context, int index, Operand value, bool uniform)
         {

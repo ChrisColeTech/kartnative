@@ -31,6 +31,22 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("IMAD.WIDE", 0x025, Sm86Forms.All, Sm86Emit.ImadWide, Rd);
             Add("UIMAD.WIDE", 0x0a5, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.ImadWide, Rd | U);
             Add("IMAD.HI", 0x027, Sm86Forms.All, Sm86Emit.ImadHi, Rd);
+            Add("IDP.4A", 0x026, Sm86Forms.All, Sm86Emit.Idp4a, Rd);
+            Add("LEA", 0x011, Sm86Forms.All, Sm86Emit.Lea, Rd);
+            Add("ULEA", 0x091, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Lea, Rd | U);
+            Add("IABS", 0x013, Sm86Forms.BSlot, Sm86Emit.Iabs, Rd);
+            Add("PRMT", 0x016, Sm86Forms.All, Sm86Emit.Prmt, Rd);
+            Add("UPRMT", 0x096, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Prmt, Rd | U);
+            Add("SGXT", 0x01a, Sm86Forms.All, Sm86Emit.Sgxt, Rd);
+            Add("USGXT", 0x09a, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Sgxt, Rd | U);
+            Add("BMSK", 0x01b, Sm86Forms.All, Sm86Emit.Bmsk, Rd);
+            Add("UBMSK", 0x09b, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Bmsk, Rd | U);
+            Add("FLO", 0x100, Sm86Forms.BSlot, Sm86Emit.Flo, Rd);
+            Add("UFLO", 0x0bd, Sm86Forms.R | Sm86Forms.I, Sm86Emit.Flo, Rd | U);
+            Add("BREV", 0x101, Sm86Forms.BSlot, Sm86Emit.Brev, Rd);
+            Add("UBREV", 0x0be, Sm86Forms.R | Sm86Forms.I, Sm86Emit.Brev, Rd | U);
+            Add("POPC", 0x109, Sm86Forms.BSlot, Sm86Emit.Popc, Rd);
+            Add("UPOPC", 0x0bf, Sm86Forms.R | Sm86Forms.I, Sm86Emit.Popc, Rd | U);
 
             Add("FADD", 0x021, Sm86Forms.All, Sm86Emit.Fadd, Rd);
             Add("FMUL", 0x020, Sm86Forms.All, Sm86Emit.Fmul, Rd);
