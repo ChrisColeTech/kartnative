@@ -307,6 +307,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
 
+### Sparse texture checks keep the dirty range they found
+
+- **Symptom:** after any guest write the submit thread spends much of its time in `nvn_dirty_since` ← `nvn_sparse_since` ← `tex_mtl` ← `draw`; the main thread waits on it (frame time several times the GPU time).
+- **Cause:** a sparse texture's clean check walks its virtual range's mapped runs and asked the dirty tracker about each run, which looked the run up among every pool's tracking range (`find_span`) before reading its pages. A large sparse array has thousands of runs, and a game with thousands of pools pays that for each, on every draw binding the texture.
+- **Fix:** the walk keeps the range it found (`nvn_dirty_since_keep`, `hle_nvn.c` `run_written`), and each tracking range records its newest write (`nvn_dirty.c` `last`, an atomic maximum stored before the page's generation), so a range nobody wrote since the texture's stamp answers without its pages.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 8192×8192×68 sparse arrays and about 4,800 memory pools; the walk was 26% of the submit thread's samples (MacPlay's `sample` of the title screen). Title screen frame time p50 89 → 26 ms.
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).
