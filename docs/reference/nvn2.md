@@ -4,6 +4,8 @@ The NVN API of Switch 2 games (NVN2), as Mario Kart World 1.0.0 (`0400C3F00006E0
 
 Evidence is given as module offsets in this game's build: `sdk+0x…` in the sdk module (build ID `90ebba182862b9ecdc21fcb87b999012`, which contains the NVN2 driver) and `main+0x…` in main (`9e244438c3d8ef1c703a6a85ef99c4f0`). Offsets are into the loaded image (`dm/tools/nso.py <module> <out.bin>`; Ghidra on `dm/tools/nso2elf.py` output adds 0x100000). "NVN1" means the NVN 55 interface in `dm/gfx/nvn/include/nvn.h` that the host implements; "same ABI" means the driver uses the arguments `nvn.h` declares, with the same types. Statements marked [INFERENCE] were not checked against code.
 
+Clean-room C declarations of these facts (object sizes, enums the binary shows, prototypes of every new function and of every function whose ABI changed) are in [`dm/gfx/nvn/include/nvn2.h`](../../dm/gfx/nvn/include/nvn2.h); nothing includes it yet.
+
 ## Entry points
 
 ### How MKW fetches NVN2 functions
