@@ -41,6 +41,8 @@ NVN2(nvnMemoryPoolBuilderGetMemory, void *, const NVNmemoryPoolBuilder *b) { ret
 NVN2(nvnMemoryPoolBuilderGetSize, size_t, const NVNmemoryPoolBuilder *b) { return (size_t)CPB(b)->size; }
 // GetFlags (sdk+0x5bd330): the normalised flags without the driver-internal bits 22-31
 NVN2(nvnMemoryPoolGetFlags, int, const NVNmemoryPool *p) { return (int)(CP(p)->flags & 0x3fffff); }
+// GetBufferAddress (sdk+0x5bd2a0): the generic GPU address; a PHYSICAL pool has no GPU mapping (it is only reached through virtual pools), so 0
+NVN2(nvnMemoryPoolGetBufferAddress, uint64_t, const NVNmemoryPool *p) { return CP(p)->flags & PF_PHYSICAL ? 0 : (uint64_t)CP(p)->mem; }
 
 // NVX: the NvRm memory handle of a pool. The host has no NvRm memory objects: a pool cannot be imported from one, and none has a handle (0)
 NVN2(nvnMemoryPoolBuilderSetNativeHandleNVX, void, NVNmemoryPoolBuilder *b, uint32_t h) {
@@ -55,7 +57,7 @@ NVN2(nvnMemoryPoolBuilderGetReservedAddressesNVX, void, const NVNmemoryPoolBuild
     if (generic) *generic = CPB(b)->nvx_generic;
     if (special) *special = CPB(b)->nvx_special;
 }
-NVN2(nvnMemoryPoolGetGenericAddressNVX, uint64_t, const NVNmemoryPool *p) { return (uint64_t)CP(p)->mem; }   // = GetBufferAddress
+NVN2(nvnMemoryPoolGetGenericAddressNVX, uint64_t, const NVNmemoryPool *p) { return h2_nvnMemoryPoolGetBufferAddress(p); }   // = GetBufferAddress (pool+0x18)
 // The compressible-kind address (0 for other pools): on the host the same memory has one address
 NVN2(nvnMemoryPoolGetSpecialAddressNVX, uint64_t, const NVNmemoryPool *p) { return CP(p)->flags & PF_COMPRESSIBLE ? (uint64_t)CP(p)->mem : 0; }
 
