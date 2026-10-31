@@ -2434,9 +2434,12 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
     if (!r && rs) r = fn(rs, (uint64_t)(re - rs), arg);
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
-static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since(p, n, stamp); }
+// A sparse texture's mapped runs mostly lie in one physical pool: the walk keeps the dirty-tracking range it found, so each run is not looked up among every pool's range (Mario Kart
+// World's 8192x8192x68 arrays: a check walked thousands of runs, each a scan of ~4,800 ranges, on every draw binding one, 26% of the submit thread)
+struct run_ctx { uint64_t stamp; const void *span; };
+static int run_written(const uint8_t *p, uint64_t n, uint64_t arg) { struct run_ctx *c = (struct run_ctx *)(uintptr_t)arg; return nvn_dirty_since_keep(&c->span, p, n, c->stamp); }
 static int run_protect(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect(p, n); return 0; }
-int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { return vpt_walk(pool, a, n, gen, run_written, stamp); }
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { struct run_ctx c = {stamp, NULL}; return vpt_walk(pool, a, n, gen, run_written, (uint64_t)(uintptr_t)&c); }
 int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every page of [a, a+n) has memory behind it
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }
