@@ -66,7 +66,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            _cbSlotToBindingMap = new SetBindingPair[18];
+            // nxnative: 32 slots, the 5-bit bank field. Maxwell binds at most 18; SM86 (Switch 2) programs also read bank 24, a block the console
+            // provides to NVN2's fullscreen blits (docs/reference/shaders-sm86.md). Unused slots stay unbound, so Maxwell output is unchanged.
+            _cbSlotToBindingMap = new SetBindingPair[32];
             _sbSlotToBindingMap = new SetBindingPair[16];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));

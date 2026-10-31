@@ -522,7 +522,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             context.Copy(Register(destPredInv, RegisterType.Predicate), p1Res);
         }
 
-        private static Operand GetFPComparison(EmitterContext context, FComp cond, Operand srcA, Operand srcB, Instruction fpType = Instruction.FP32)
+        // nxnative: internal, shared with the SM86 frontend (Sm86/Sm86Emit.Alu.cs).
+        internal static Operand GetFPComparison(EmitterContext context, FComp cond, Operand srcA, Operand srcB, Instruction fpType = Instruction.FP32)
         {
             Operand res;
 

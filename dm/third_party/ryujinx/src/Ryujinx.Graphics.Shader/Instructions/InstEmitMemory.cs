@@ -60,6 +60,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstLdc op = context.GetOp<InstLdc>();
 
+            EmitLdc(context, new LdcFields(op.Dest, op.SrcA, op.CbufSlot, op.CbufOffset, op.LsSize, op.AddressMode));
+        }
+
+        // nxnative: decoded LDC fields (CbufOffset: the signed 16-bit byte offset as encoded), so the SM86 LDC (Sm86/Sm86Emit.Mem.cs) shares the emitter.
+        internal readonly record struct LdcFields(int Dest, int SrcA, int CbufSlot, int CbufOffset, LsSize2 LsSize, AddressMode AddressMode);
+
+        internal static void EmitLdc(EmitterContext context, LdcFields op)
+        {
             if (op.LsSize > LsSize2.B64)
             {
                 context.TranslatorContext.GpuAccessor.Log($"Invalid LDC size: {op.LsSize}.");
@@ -166,7 +174,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitStore(context, StorageKind.SharedMemory, op.LsSize, GetSrcReg(context, op.SrcA), op.Dest, Imm24ToSInt(op.Imm24));
         }
 
-        private static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset)
+        // nxnative: internal, the SM86 frontend loads constant-buffer operands with it (Sm86/Sm86Emit.cs).
+        internal static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset)
         {
             Operand vecIndex = context.ShiftRightU32(offset, Const(2));
             Operand elemIndex = context.BitwiseAnd(offset, Const(3));

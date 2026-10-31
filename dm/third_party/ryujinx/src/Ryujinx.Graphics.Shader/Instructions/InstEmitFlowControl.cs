@@ -39,6 +39,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand address = context.IAdd(Register(op.SrcA, RegisterType.Gpr), Const(offset));
 
+            EmitBrx(context, address, startIndex);
+        }
+
+        // nxnative: the branch to the block successors from startIndex on whose address equals the address operand, shared with the SM86 BRX
+        // (Sm86/Sm86Emit.Flow.cs).
+        internal static void EmitBrx(EmitterContext context, Operand address, int startIndex)
+        {
             IEnumerable<Block> targets = context.CurrBlock.Successors.Skip(startIndex);
 
             bool allTargetsSinglePred = true;

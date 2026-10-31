@@ -266,7 +266,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return res;
         }
 
-        private static Operand GetIntComparison(EmitterContext context, IComp cond, Operand srcA, Operand srcB, bool isSigned)
+        // nxnative: internal, shared with the SM86 frontend (Sm86/Sm86Emit.Alu.cs).
+        internal static Operand GetIntComparison(EmitterContext context, IComp cond, Operand srcA, Operand srcB, bool isSigned)
         {
             Operand res;
 

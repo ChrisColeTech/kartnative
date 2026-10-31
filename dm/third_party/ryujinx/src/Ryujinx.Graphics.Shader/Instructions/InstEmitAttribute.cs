@@ -20,6 +20,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAld op = context.GetOp<InstAld>();
 
+            EmitAld(context, new AldFields(op.Dest, op.SrcA, op.SrcB, op.Imm11, (int)op.AlSize, op.P, op.O, op.Phys));
+        }
+
+        // nxnative: decoded ALD / AST / IPA fields, so the SM86 frontend (Sm86/Sm86Emit.Mem.cs) shares these emitters.
+        internal readonly record struct AldFields(int Dest, int SrcA, int SrcB, int Imm11, int AlSize, bool P, bool O, bool Phys);
+
+        internal readonly record struct AstFields(int SrcA, int SrcB, int Imm11, int AlSize, bool P, bool Phys);
+
+        internal readonly record struct IpaFields(int Dest, int SrcA, int SrcB, int Imm10, bool Idx, IpaOp IpaOp, bool Sat);
+
+        internal static void EmitAld(EmitterContext context, AldFields op)
+        {
             // Some of those attributes are per invocation,
             // so we should ignore any primitive vertex indexing for those.
             bool hasPrimitiveVertex = AttributeMap.HasPrimitiveVertex(context.TranslatorContext.Definitions.Stage, op.O) && !op.P;
@@ -106,6 +118,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAst op = context.GetOp<InstAst>();
 
+            EmitAst(context, new AstFields(op.SrcA, op.SrcB, op.Imm11, (int)op.AlSize, op.P, op.Phys));
+        }
+
+        internal static void EmitAst(EmitterContext context, AstFields op)
+        {
             for (int index = 0; index < (int)op.AlSize + 1; index++)
             {
                 if (op.SrcB + index > RegisterConsts.RegisterZeroIndex)
@@ -147,6 +164,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstIpa op = context.GetOp<InstIpa>();
 
+            EmitIpa(context, new IpaFields(op.Dest, op.SrcA, op.SrcB, op.Imm10, op.Idx, op.IpaOp, op.Sat));
+        }
+
+        internal static void EmitIpa(EmitterContext context, IpaFields op)
+        {
             Operand res;
 
             bool isFixedFunc = false;

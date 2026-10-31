@@ -6,6 +6,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
     {
         public readonly ulong Address;
         public readonly ulong RawOpCode;
+        // nxnative: bits 64-127 of a 128-bit SM70+ instruction (the SM86 frontend, Sm86/); 0 for Maxwell.
+        public readonly ulong RawOpCodeHi;
         public readonly InstEmitter Emitter;
         public readonly InstProps Props;
         public readonly InstName Name;
@@ -14,9 +16,20 @@ namespace Ryujinx.Graphics.Shader.Decoders
         {
             Address = address;
             RawOpCode = rawOpCode;
+            RawOpCodeHi = 0;
             Name = name;
             Emitter = emitter;
             Props = props;
+        }
+
+        public InstOp(ulong address, ulong rawOpCode, ulong rawOpCodeHi, InstEmitter emitter)
+        {
+            Address = address;
+            RawOpCode = rawOpCode;
+            RawOpCodeHi = rawOpCodeHi;
+            Name = InstName.Invalid;
+            Emitter = emitter;
+            Props = InstProps.None;
         }
 
         public ulong GetAbsoluteAddress()

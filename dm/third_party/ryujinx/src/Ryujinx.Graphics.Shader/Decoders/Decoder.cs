@@ -9,7 +9,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
 {
     static class Decoder
     {
-        private class Context
+        // nxnative: internal, shared with the SM86 decoder (Sm86/Sm86Decoder.cs).
+        internal class Context
         {
             public AttributeUsage AttributeUsage { get; }
             public FeatureFlags UsedFeatures { get; private set; }
@@ -206,7 +207,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 context.Cb1DataSize);
         }
 
-        private static bool BinarySearch(List<Block> blocks, ulong address, out int index)
+        internal static bool BinarySearch(List<Block> blocks, ulong address, out int index)
         {
             index = 0;
 
@@ -371,6 +372,12 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 indexed = opIpa.Idx;
             }
 
+            SetUserAttributeUses(definitions, context, offset, count, isStore, indexed, perPatch);
+        }
+
+        // nxnative: the attribute fields as decoded values, shared with the SM86 decoder.
+        internal static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, int offset, int count, bool isStore, bool indexed, bool perPatch)
+        {
             if (indexed)
             {
                 if (isStore)
