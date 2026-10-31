@@ -767,7 +767,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env, loose=None, version='v0'):
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
     notes = []
     if not vulkan and not gl and 'nvnBootstrapLoader' not in mods['main']['imports']: notes.append('main imports neither nvnBootstrapLoader nor Vulkan functions nor OpenGL through EGL: the host implements only NVN, Vulkan and OpenGL')
-    if F.get('switch2'): notes.append('a Switch 2 program: NVN2 and SM86 shaders, Switch 2 SVCs and services; the profile\'s switch2 key selects the host\'s Switch 2 behaviour, and the shader chain does not translate SM86 yet (the build splits the shaders but does not translate them)')
+    if F.get('switch2'): notes.append('a Switch 2 program: NVN2 and SM86 shaders, Switch 2 SVCs and services; the profile\'s switch2 key selects the host\'s Switch 2 behaviour, and the shader chain translates its SM86 programs with the translator\'s SM86 frontend (task and mesh programs not yet; a Mac build only for now)')
     if vulkan: notes.append(f'{S["graphics"][1]}; the NVN shader steps are skipped' + (', and its shaders are captured by booting it on the Mac (no SPIR-V file in the RomFS)' if S['vk_capture'][0] else ''))
     if gl: notes.append(f'{S["graphics"][1]}; the NVN shader steps are skipped: gl_shaders.py translates its GLSL sources (MVGL archives, main\'s strings'
                         + (', and the shaders it puts together at run time, captured by booting it on the Mac)' if S['gl_capture'][0] else ')'))
@@ -1011,7 +1011,7 @@ def check_capstone():   # patch_nso.py checks the same, but only at the rewrite 
         raise BuildError(f'Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {cmd}')
 
 
-def check_prereqs(env, xlate, mac=False, chain=True):   # mac: a Mac-only build (PLATFORM 'mac'), which needs no xcodegen and compiles shaders only for macOS; chain False: a build that translates no shader (Switch 2)
+def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'mac'), which needs no xcodegen and compiles shaders only for macOS
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 "capstone>=5,<6" fonttools backports.zstd; backports.zstd only before Python 3.14)')
     check_capstone()
@@ -1019,7 +1019,6 @@ def check_prereqs(env, xlate, mac=False, chain=True):   # mac: a Mac-only build 
     if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
-    if not chain: return   # the Metal compiler, the translator and SPIRV-Cross serve only the translation (the host compiles its own MSL at run time without the Metal toolchain: host_msl.py)
     if not mac: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
     mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
     if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
@@ -2112,7 +2111,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
     if gfx == 'nvn': renv['DM_NVN_SHMAP'] = g.table('shader_map.tsv')
     renv.update(DM_LANG=lang, DM_WINDOW=1, DM_AUDIO=1)
     if env_file: renv.update(env_file_pairs(env_file))
-    if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() and g.get('switch2', 'off') != 'on':   # a Switch 2 build has no shader library to prebuild from (build_shaders is not run)
+    if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file():
         if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file(): renv['DM_PSO_PAIRS'] = work / 'shader/pso_pairs.tsv'   # split_shaders' copy
         # The pipeline prebuild (docs/development.md, Hybrid pipelines): the pulling base of every shader pair into run/pso_archive, so the first run's draws have stand-ins instead
         # of waiting for the Metal compiler. The host's tool mode skips it when pso_archive/prebuilt.tsv matches (chain version, depth mode, pair list): Breath of the Wild's
@@ -2380,10 +2379,9 @@ def main(args=None):
         g, provisional = gamemod.load(f'{app:016X}'), True
         say('[RED] provisional game profile: values guessed from the survey, the game may not boot; bring it up per docs/agents after packing')
     say(f'game profile: {g.id}{" (provisional: " + str(g.dir) + ")" if provisional else ""}')
-    # A Switch 2 program (profile key switch2, from main.npdm's ACID layout): the shader split reads its NVN2 containers, but the chain cannot translate SM86 code yet, so the build has
-    # no shader library and only a Mac build for development (the host's bring-up) is made
-    switch2 = g.get('switch2', 'off') == 'on'
-    if switch2 and platform != 'mac': raise BuildError(f'game profile {g.id} is a Switch 2 program, whose SM86 shaders the shader chain does not translate yet: build it with --platform mac (development) for now')
+    # A Switch 2 program (profile key switch2, from main.npdm's ACID layout): the shader split reads its NVN2 containers and the chain translates its SM86 programs (task and mesh
+    # ones not yet); the host's Switch 2 bring-up is on the Mac, so only a Mac build for development is made for now
+    if g.get('switch2', 'off') == 'on' and platform != 'mac': raise BuildError(f'game profile {g.id} is a Switch 2 program, whose host bring-up is on the Mac: build it with --platform mac (development) for now')
     builds, need = g.builds(), g.words('shader_versions')
     have, derived = {loose_version(loose, g, args.package or PACKAGE): None} if loose else nsp_versions(fam, builds), False   # a loose dump holds one version
     if provisional:   # the version the survey saw
@@ -2423,7 +2421,7 @@ def main(args=None):
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
-    check_prereqs(env, xlate, mac, not switch2)   # a Switch 2 build translates no shader: no Metal compiler or translator needed
+    check_prereqs(env, xlate, mac)
     picks = {} if loose else pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
@@ -2468,7 +2466,7 @@ def main(args=None):
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')
-    if gfx == 'nvn' and not switch2: check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
+    if gfx == 'nvn': check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
     for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
         if on: say(src[k][1])
     PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))
@@ -2532,10 +2530,7 @@ def main(args=None):
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
-        if switch2:   # the split reads NVN2's containers; the chain's translator has no SM86 decoder yet, so there is no library to build (the host runs without one)
-            PROG.stage('Mac shaders'); ios = sh / 'cache'; ios.mkdir(parents=True, exist_ok=True)
-            PROG.end('[RED] not translated: the shader chain has no SM86 decoder yet (Switch 2)')
-        else: ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
+        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)

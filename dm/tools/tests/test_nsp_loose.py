@@ -106,12 +106,6 @@ class Loose(unittest.TestCase):
             nsp.write_profile(self.tmp / 'profile' / f'{APP:016X}', APP, {'F': F, 'name': '', 'display': '?', 'version': 'v0', 'survey': 'survey.md'})
         self.assertFalse(any(r.startswith('switch2') for r in (self.tmp / 'profile' / f'{APP:016X}' / 'game.tsv').read_text().splitlines()))
 
-    def test_a_build_without_translation_needs_no_chain_tools(self):   # a Switch 2 build: the split runs, nothing is translated or compiled by Metal
-        with mock.patch.object(nsp, '_importable', return_value=True), mock.patch.object(nsp, 'check_capstone'), \
-             mock.patch.object(nsp.shutil, 'which', return_value='/usr/bin/true'), mock.patch.object(nsp.subprocess, 'run', side_effect=AssertionError('the Metal compiler was run')):
-            nsp.check_prereqs({'PATH': '/usr/bin'}, self.tmp / 'missing/dmsh_xlate', True, False)
-            with self.assertRaises(AssertionError): nsp.check_prereqs({'PATH': '/usr/bin'}, self.tmp / 'missing/dmsh_xlate', True)
-
 
 if __name__ == '__main__':
     unittest.main()
