@@ -54,6 +54,9 @@ static int detclock_cfg(void) {
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
+// The system counter the guest reads (mrs cntpct_el0 / cntvct_el0 gate, svc GetSystemTick), from the guest clock: the Switch's runs at 19.2 MHz (12 ticks per 625 ns), the Switch 2's at
+// 31.25 MHz (one tick per 32 ns; its SDK's tick-to-time conversions assume that frequency, so 19.2 MHz ticks ran its clocks at 0.61 of real time)
+uint64_t guest_ticks(void) { return DM_GAME_SWITCH2 ? guest_ns() / 32 : guest_ns() * 12 / 625; }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
