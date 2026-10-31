@@ -1,5 +1,6 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using Ryujinx.Graphics.Shader.Sm86;
 using System;
 using System.Linq;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
@@ -32,12 +33,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             ShaderDefinitions definitions;
             DecodedProgram program;
 
+            // nxnative: SM70+ code (Switch 2) goes through the SM86 frontend; its graphics header is 128 bytes.
+            bool sm86 = options.Flags.HasFlag(TranslationFlags.Sm86);
+            int headerSize = sm86 ? Sm86Decoder.GraphicsHeaderSize : HeaderSize;
+
             if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = Decoder.Decode(definitions, gpuAccessor, address);
+                program = sm86 ? Sm86Decoder.Decode(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
             }
             else
             {
@@ -46,7 +51,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions = CreateGraphicsDefinitions(gpuAccessor, header);
                 localMemorySize = GetLocalMemorySize(header);
 
-                program = Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
+                program = sm86
+                    ? Sm86Decoder.Decode(definitions, gpuAccessor, address + (ulong)headerSize)
+                    : Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
             }
 
             ulong maxEndAddress = 0;
@@ -62,7 +69,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
 
             return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
         }
@@ -143,7 +150,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             initializationOperations = 0;
 
-            FunctionMatch.RunPass(program);
+            // nxnative: the SM86 frontend's blocks hold 128-bit instructions; FunctionMatch looks for Maxwell code patterns.
+            bool sm86 = translatorContext.Options.Flags.HasFlag(TranslationFlags.Sm86);
+
+            if (!sm86)
+            {
+                FunctionMatch.RunPass(program);
+            }
 
             foreach (DecodedFunction function in program.Where(x => !x.IsCompilerGenerated).OrderBy(x => x.Address))
             {
@@ -170,7 +183,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     context.EnterBlock(block.Address);
 
-                    EmitOps(context, block);
+                    if (sm86)
+                    {
+                        Sm86Translator.EmitOps(context, block);
+                    }
+                    else
+                    {
+                        EmitOps(context, block);
+                    }
                 }
 
                 functions[index] = new(context.GetOperations());

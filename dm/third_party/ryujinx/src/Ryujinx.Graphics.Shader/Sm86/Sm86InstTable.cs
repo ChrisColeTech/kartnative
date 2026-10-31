@@ -91,6 +91,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
         static Sm86InstTable()
         {
+            AddFlow();
         }
 
         public static Sm86InstInfo Get(int opcode) => _table[opcode & 0xfff];
