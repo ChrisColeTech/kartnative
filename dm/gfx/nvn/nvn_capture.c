@@ -1,5 +1,6 @@
 // NVN frame capture: the record field walk and the chunk file (see nvn_capture.h). Plain C, shared by the host, the replayer and the unit test.
 #include "nvn_capture.h"
+#include "nvn2_cmd.h"   // the NVN2 payloads (OP_PUSH_CONST, OP_MESH)
 #include <stdlib.h>
 #include <string.h>
 #include <compression.h>
@@ -30,15 +31,17 @@ CAP_SIZE(p_clear_buf, 24); CAP_OFF(p_clear_buf, addr, 0); CAP_OFF(p_clear_buf, s
 CAP_SIZE(p_tf_bind, 24); CAP_OFF(p_tf_bind, addr, 8); CAP_OFF(p_tf_bind, size, 16);
 CAP_SIZE(p_tf_state, 16); CAP_OFF(p_tf_state, ctl, 8);
 CAP_SIZE(p_render_cond, 16); CAP_OFF(p_render_cond, mode, 0); CAP_OFF(p_render_cond, addr, 8);
-_Static_assert(OP_COUNT_ == 53, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
+CAP_SIZE(p_push_const, 8); CAP_SIZE(p_mesh, 40); CAP_OFF(p_mesh, ind, 16); CAP_OFF(p_mesh, cnt, 24);
+_Static_assert(OP_COUNT_ == 55, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
-    return "format 1\nops 53\n"
+    return "format 1\nops 55\n"
            "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 16\nsamp_par 40\nview_t 16\n"
            "p_set_rt 240 color 8 depth 208\np_bind_program 16\np_bind_vbuf 264 r 8\np_bind_vbuf1 16 addr 8\np_bind_buf 24 addr 8\np_bind_ubo_small 16 addr 8\n"
            "p_bind_handles 280 src 16\np_bind_tex1 24\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"
+           "p_push_const 8 src 8\np_mesh 40 ind 16 cnt 24\n"
            "signal_event 16 val 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n";
 }
 
@@ -102,6 +105,17 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
         case OP_TF_BIND: return HAS(16) && ops->addr(ctx, F(8), u64_at(payload + 16), 1);
         case OP_TF_STATE: return HAS(8) && ops->addr(ctx, F(8), 32, 1);
         case OP_RENDER_COND: if (!HAS(8)) return 0; return i32_at(payload) >= 2 || ops->addr(ctx, F(8), 32, 0);
+        case OP_PUSH_CONST: {   // the bytes are in the record, or for a deferred push read at replay from the address there (part of the frame's input)
+            if (!HAS(0)) return 0; uint32_t n; memcpy(&n, payload + 4, 4);
+            return !(payload[0] & PUSH_DEFERRED) || (HAS(offsetof(p_push_const, data)) && ops->addr(ctx, F(offsetof(p_push_const, data)), n, 0));
+        }
+        case OP_MESH: {   // the indirect records (drawCount or maxDrawCount of them, stride apart) and the draw count the GPU reads
+            if (!HAS(32)) return 0; const p_mesh *m = (const p_mesh *)payload; int three = m->kind & 1;
+            uint64_t rec = three ? 12 : 8, stride = m->stride > 0 ? (uint64_t)m->stride : rec, n = m->kind >= MESH_MULTI_INDIRECT && m->n > 0 ? (uint64_t)m->n : 1;
+            if (m->ind) ok &= ops->addr(ctx, F(offsetof(p_mesh, ind)), stride * (n - 1) + rec, 0);
+            if (m->cnt) ok &= ops->addr(ctx, F(offsetof(p_mesh, cnt)), 4, 0);
+            return ok;
+        }
     }
     return 0;
 }
