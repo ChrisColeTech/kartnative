@@ -95,6 +95,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
             AddMem();
             AddTex();
             AddFlow();
+            AddWarp();
         }
 
         public static Sm86InstInfo Get(int opcode) => _table[opcode & 0xfff];
