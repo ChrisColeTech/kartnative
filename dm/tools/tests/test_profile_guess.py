@@ -36,6 +36,46 @@ class Npdm(unittest.TestCase):
         self.assertTrue(pg.aarch64(Path(self.tmp.name) / 'missing.npdm'))
 
 
+def npdm_bytes(sig_area, program=0x0400C3F00006E000, flags=0x3f, sysres=0x4000000):
+    """A main.npdm: META (0x80 bytes), ACI0 at 0x80 (program ID at +0x10), ACID at 0xc0 whose "ACID" magic follows a signature / key area of sig_area bytes
+    (Switch 1: 0x200, Switch 2: 0x300; Mario Kart World's ACID has the Switch 2 one)"""
+    import struct
+    aci, acid = 0x80, 0xc0
+    d = bytearray(acid + sig_area + 0x240)
+    d[:4] = b'META'; d[0xc] = flags; struct.pack_into('<I', d, 0x14, sysres)
+    struct.pack_into('<IIII', d, 0x70, aci, 0x40, acid, sig_area + 0x240)
+    d[aci:aci + 4] = b'ACI0'; struct.pack_into('<Q', d, aci + 0x10, program)
+    d[acid + sig_area:acid + sig_area + 4] = b'ACID'
+    return bytes(d)
+
+
+class Switch2Npdm(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+
+    def write(self, data):
+        p = Path(self.tmp.name) / 'main.npdm'; p.write_bytes(data); return p
+
+    def test_switch2_acid_layout(self):
+        p = self.write(npdm_bytes(0x300))
+        self.assertTrue(pg.switch2(p))
+        self.assertEqual(pg.npdm(p), (0x4000000, 0x0400C3F00006E000))   # the layout change is in ACID only: META and ACI0 read as on Switch 1
+
+    def test_switch1_acid_layout(self):
+        p = self.write(npdm_bytes(0x200, program=0x0100152000022000))
+        self.assertFalse(pg.switch2(p))
+        self.assertEqual(pg.npdm(p)[1], 0x0100152000022000)
+
+    def test_no_acid_magic_is_not_switch2(self):   # neither place holds the magic: a damaged or unknown layout is not taken for Switch 2
+        d = bytearray(npdm_bytes(0x300)); d[0xc0 + 0x300:0xc0 + 0x304] = b'XXXX'
+        self.assertFalse(pg.switch2(self.write(bytes(d))))
+
+    def test_no_npdm_or_no_meta(self):
+        self.assertFalse(pg.switch2(Path(self.tmp.name) / 'missing.npdm'))
+        self.assertFalse(pg.switch2(self.write(b'\0' * 0x400)))
+
+
 class UnrealMemory(unittest.TestCase):
     def test_initial_heap_fits_beside_the_engine_region(self):
         facts = {
