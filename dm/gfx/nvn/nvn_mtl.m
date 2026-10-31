@@ -1610,7 +1610,7 @@ static int g_red_once[141];
 #define VB_SLOT(st) ((st) < 14 ? 16 + (st) : (st))
 
 // ---------- Texture → MTLTexture ----------
-static int fmt_compressed(int f) { return (f >= 0x41 && f <= 0x50) || (f >= 0x79 && f <= 0x94); }
+static int fmt_compressed(int f) { return nvn_fmt_is_bc(f) || (f >= 0x79 && f <= 0x94); }   // BC (nvn_tex.c, with NVN2's 0x9d-0xa0) and ASTC
 static int fmt_depth(int f) { return f >= 0x31 && f <= 0x36; }
 typedef struct { MTLPixelFormat a, b; } pfv_pair;
 static const pfv_pair g_pfv_srgb[] = {
@@ -3252,7 +3252,7 @@ void pg_commit_ext(id<MTLCommandBuffer> cb) { pg_commit(cb); }
 // (the pipeline descriptor validation aborts the process). A BC texture with an uncompressed view whose pixel size equals the block size is drawn through a shadow (bcrt_attach); any other compressed target
 // is left out (a pass with no attachment at all skips its draws), with a red line
 static int mtl_fmt_block(MTLPixelFormat f) { return (f >= MTLPixelFormatBC1_RGBA && f <= MTLPixelFormatBC7_RGBAUnorm_sRGB) || (f >= MTLPixelFormatPVRTC_RGB_2BPP && f < MTLPixelFormatGBGR422); }
-static int nvn_fmt_bc(uint32_t f) { return f >= 0x41 && f <= 0x50; }   // NVN BC1–7 / BC6H formats (0x41 RGB_DXT1 … 0x50 BC6H unsigned)
+static int nvn_fmt_bc(uint32_t f) { return nvn_fmt_is_bc((int)f); }   // NVN BC1–7 / BC6H formats (0x41 RGB_DXT1 … 0x50 BC6H unsigned, NVN2's 0x9d–0xa0)
 static int bc_block_bytes(MTLPixelFormat f) {   // bytes per 4x4 block of a BC format, 0 for other formats
     if (f < MTLPixelFormatBC1_RGBA || f > MTLPixelFormatBC7_RGBAUnorm_sRGB) return 0;
     return f <= MTLPixelFormatBC1_RGBA_sRGB || f == MTLPixelFormatBC4_RUnorm || f == MTLPixelFormatBC4_RSnorm ? 8 : 16;
