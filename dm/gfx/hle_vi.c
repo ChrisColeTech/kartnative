@@ -71,6 +71,45 @@ HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the ho
     p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
     return 1;
 }
+// Switch 2 SDK (Mario Kart World, SDK 19.3.3): the display's HDR and VRR queries and the layer's HDR metadata and extended swap interval. The SDK's versions check the
+// display against its own vi2 object (sdk+0x536710: anything else answers 0x272) and call through the vi2 service the host never made. The host presents in SDR (BT.709,
+// 8-bit window textures) on a fixed-rate display, so it answers no HDR and no VRR; MKW queries both from its display object (main+0x226ce40, main+0x226cdcc).
+//   QueryDisplayHdrStatus(bool *enabled, HdrOutputFormat *format, u16 *max luminance, display): HDR off, format 0; MKW keeps min(max luminance, its own limit) beside
+//   the paper white (QueryDisplayHdrPaperWhite, scaled by a float of its own). With HDR off it does not output in those units [INFERENCE: it switches its window format only with
+//   HDR on, main+0x26227c]; the host answers the BT.709 / BT.1886 SDR reference, 100 cd/m2, for both, a white that is the display's peak rather than a 0 a division could meet
+enum { VI_SDR_NITS = 100 };
+HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status; the host presents SDR: off, 100 cd/m2",
+          Result, h_vi_HdrStatus, uint8_t *enabled, uint32_t *format, uint16_t *max_nits, const void *disp) {
+    (void)disp; if (enabled) *enabled = 0; if (format) *format = 0; if (max_nits) *max_nits = VI_SDR_NITS;
+    static int once; if (!once++) LOG("vi::QueryDisplayHdrStatus: HDR off (the host presents SDR), %d cd/m2", VI_SDR_NITS);
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white; the host presents SDR: 100 cd/m2", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
+    (void)disp; if (nits) *nits = VI_SDR_NITS; return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR content metadata; the host presents SDR and ignores it",
+          Result, h_vi_HdrStd, void *layer, uint16_t lo, uint16_t hi) {
+    (void)layer; static int once; if (!once++) LOG("vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata %u..%u (ignored: the host presents SDR)", lo, hi); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR content metadata; the host presents SDR and ignores it",
+          Result, h_vi_HdrExt, void *layer, uint16_t lo, uint16_t hi) {
+    (void)layer; static int once; if (!once++) LOG("vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata %u..%u (ignored: the host presents SDR)", lo, hi); return RES_OK;
+}
+// VRR: MKW asks whether the display supports it and, when it does and its frame-rate setting is 40 or more, sets the display's VRR capability and the layer's extended swap
+// interval (layer, 1, frame rate); otherwise it clears both (main+0x226cdcc..+0x226ce38). No VRR here, so the frame rate follows the window's present interval
+// (nvnWindowSetPresentInterval, docs/reference/frame-rate.md). SetDisplayVrrCapability returns nothing (sdk+0x536670)
+HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR support; the host display has a fixed rate: no", Result, h_vi_VrrSupported, uint8_t *out, const void *disp) {
+    (void)disp; if (out) *out = 0; return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability; the host display has a fixed rate", void, h_vi_VrrCap, void *disp, uint32_t on) {
+    (void)disp; static int once; if ((on & 1) && !once++) LOG("vi::SetDisplayVrrCapability on (ignored: the host display has a fixed rate)");
+}
+HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer VRR swap interval; the host display has a fixed rate", Result, h_vi_ExtSwap, void *layer, int mode, int rate) {
+    (void)layer; static int once; if (!once++) LOG("vi::SetLayerExtendedSwapInterval mode %d rate %d (ignored: no VRR; frames follow the window's present interval)", mode, rate); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer VRR swap interval cleared; the host display has a fixed rate", Result, h_vi_ExtSwapClr, void *layer) {
+    (void)layer; return RES_OK;
+}
 HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "destroy layer; host static object", void, h_vi_DestroyLayer, void *layer) { (void)layer; }
 HLE_FORCE("_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE", "close display; host static object", void, h_vi_CloseDisp, void *disp) { (void)disp; }
 HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi service", void, h_vi_Fini, void) {}
