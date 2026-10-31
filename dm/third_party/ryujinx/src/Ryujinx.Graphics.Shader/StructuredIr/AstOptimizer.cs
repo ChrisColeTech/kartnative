@@ -24,7 +24,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     {
                         bool isWorthPropagating = propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source);
 
-                        if (propVar.Defs.Count == 1 && isWorthPropagating)
+                        if (propVar.Defs.Count == 1 && isWorthPropagating && !WritesUsedOutArguments(assignment.Source))
                         {
                             PropagateExpression(propVar, assignment.Source);
                         }
@@ -40,6 +40,29 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
 
             RemoveEmptyBlocks(mainBlock);
+        }
+
+        /// <summary>
+        /// nxnative: a call that writes out arguments (SPIR-V helper calls such as the shuffle helpers' in-range flag) must stay where it is when one of
+        /// them is read afterwards: moving the call into the use of its result would move the write past that read. An out argument is a local the call
+        /// takes that has no assignment of its own.
+        /// </summary>
+        private static bool WritesUsedOutArguments(IAstNode source)
+        {
+            if (source is not AstOperation { Inst: Instruction.Call } call)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < call.SourcesCount; index++)
+            {
+                if (call.GetSource(index) is AstOperand { Type: OperandType.LocalVariable } arg && arg.Defs.Count == 0 && arg.Uses.Count > 1)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool IsWorthPropagating(IAstNode source)
@@ -71,6 +94,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 {
                     for (int srcIndex = 0; srcIndex < useOperation.SourcesCount; srcIndex++)
                     {
+                        // nxnative: SPIR-V passes call arguments by pointer, so a call keeps its argument locals unless the expression is itself a
+                        // local (a constant or an expression there has no pointer; code generation used to fail on it).
+                        if (useOperation.Inst == Instruction.Call && source is not AstOperand { Type: OperandType.LocalVariable })
+                        {
+                            continue;
+                        }
+
                         if (useOperation.GetSource(srcIndex) == propVar)
                         {
                             useOperation.SetSource(srcIndex, source);
