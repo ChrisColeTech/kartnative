@@ -25,3 +25,6 @@ typedef struct { const char *name; void *fn; } nvn_impl;
 
 // Boolean parameters: Switch callers do not extend them, only the low 8 bits are valid
 #define B(x) ((x) & 0xff)
+
+// Appends one command record (op from nvn_obj.h, zeroed payload of `payload` bytes) to a command buffer's recording; returns the payload (hle_nvn.c)
+void *nvn_cmd_rec(NVNcommandBuffer *c, uint32_t op, size_t payload);
