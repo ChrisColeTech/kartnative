@@ -3941,6 +3941,16 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
         return dev->fn;
     }
 }
+// Keys whose library failed to load (missing file, refused reflection, another chain): tried and logged once, not again for every program that names them (Mario Kart World makes one
+// program per material around the same few missing shaders) nor by the prewarm thread after the submit thread (or the other way round). Under its own lock: the prewarm thread and
+// the parallel prefetch load too
+static NSMutableSet<NSString *> *g_shfail; static os_unfair_lock g_shfail_lk = OS_UNFAIR_LOCK_INIT;
+static int shfail_add(NSString *k) {   // 1 = newly recorded
+    os_unfair_lock_lock(&g_shfail_lk); if (!g_shfail) g_shfail = [NSMutableSet set];
+    int fresh = ![g_shfail containsObject:k]; if (fresh) [g_shfail addObject:k];
+    os_unfair_lock_unlock(&g_shfail_lk); return fresh;
+}
+static int shfail_has(NSString *k) { os_unfair_lock_lock(&g_shfail_lk); int r = [g_shfail containsObject:k]; os_unfair_lock_unlock(&g_shfail_lk); return r; }
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
@@ -3954,8 +3964,8 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
     id<MTLLibrary> lib = lib_from_file(lp, &e);
-    if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
-    if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
+    if (!lib || !j) { if (layer || shfail_add(pc)) MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
+    if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { if (layer || shfail_add(pc)) MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
     NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
@@ -4069,16 +4079,13 @@ static int rt_range_pr_ro(NvProg *p) {
     for (int k=0;k<6;k++) if (p->sh[k] && (k>1 || p->sh[k]->stage != k || !p->sh[k]->range_ro || p->sh[k]->rf.drv_read[0] || p->sh[k]->rf.drv_read[2])) return 0;
     return 1;
 }
-// Keys whose library failed to load (missing file, reflection refused): tried and logged once, not again for every program that names them (Mario Kart World makes one program
-// per material around the same few missing shaders, and each retry logged shader_load's red line again). Read and written on the submit thread only, as g_shcache
-static NSMutableSet<NSString *> *g_shfail;
 static NvShader *shader_get(NSString *pc, int stage) {
     if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
     NvShader *o = g_shcache[pc];
     if (o) return o;
-    if ([g_shfail containsObject:pc]) return nil;
+    if (shfail_has(pc)) return nil;
     uint64_t bt = bp_now(); o = shader_load(pc, stage, 0);
-    if (!o) { if (!g_shfail) g_shfail = [NSMutableSet set]; [g_shfail addObject:pc]; return nil; }
+    if (!o) { shfail_add(pc); return nil; }
     g_shcache[pc] = o;
     pso_record("S\t%s\t%d\n", pc.UTF8String, stage);
     pso_user_record("S\t%s\t%d\n", pc.UTF8String, stage);
@@ -6620,7 +6627,8 @@ static int warm_stale(NSString *key, NSMutableSet<NSString *> *stale) {
 static NvShader *warm_shader(NSString *key, int stage) {
     os_unfair_lock_lock(&g_warm_dict_lock); id sh = g_warm_dict[key]; os_unfair_lock_unlock(&g_warm_dict_lock);
     if (!sh) {
-        NvShader *n = shader_load(key, stage, 0);
+        NvShader *n = shfail_has(key) ? nil : shader_load(key, stage, 0);
+        if (!n) shfail_add(key);
         if (n && n->stage == 0 && n->has_pull && !n->layer_out && hybrid_on()) pull_load(n);   // its pulling entry too, as shader_prefetch_rest loads it, so a draw that falls back to it loads nothing (no other thread has n yet)
         os_unfair_lock_lock(&g_warm_dict_lock); sh = g_warm_dict[key]; if (!sh) g_warm_dict[key] = sh = n ?: (id)NSNull.null; os_unfair_lock_unlock(&g_warm_dict_lock);
     }
@@ -7719,7 +7727,7 @@ static void shader_prefetch_rest(void) {
             NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
             if (st < 0) continue;
             NSString *lk = [k stringByAppendingString:@"_b"];
-            if (g_shcache[lk] || [g_shfail containsObject:lk] || [seen containsObject:lk]) continue;
+            if (g_shcache[lk] || shfail_has(lk) || [seen containsObject:lk]) continue;
             [seen addObject:lk]; [keys addObject:lk]; [stages addObject:@(st)];
         }
     }
@@ -7732,7 +7740,7 @@ static void shader_prefetch_rest(void) {
         os_unfair_lock_lock(&g_pf_lock); if (o) res[i] = o; os_unfair_lock_unlock(&g_pf_lock);
     } });
     unsigned got = 0;
-    for (NSUInteger i = 0; i < n; i++) { NvShader *o = res[i]; if ((id)o == NSNull.null) { if (!g_shfail) g_shfail = [NSMutableSet set]; [g_shfail addObject:keys[i]]; continue; }
+    for (NSUInteger i = 0; i < n; i++) { NvShader *o = res[i]; if ((id)o == NSNull.null) { shfail_add(keys[i]); continue; }
         g_shcache[keys[i]] = o; got++;
         pso_record("S\t%s\t%d\n", keys[i].UTF8String, stages[i].intValue); pso_user_record("S\t%s\t%d\n", keys[i].UTF8String, stages[i].intValue); }
     uint64_t dt = bp_now() - t0; g_bp_lib_n += got; g_bp_lib_ns += dt; g_pf_n += got; g_pf_ns += dt;
