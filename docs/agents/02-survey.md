@@ -42,8 +42,8 @@ The tables below are what to check by hand afterwards.
 
 ## SVCs and instructions to rewrite
 
-- `dm/tools/insn_census.py <module.nso> [--sites tsv]` counts every site the rewriter must handle: `svc`, `mrs/msr tpidr*`, `x18` use, exclusive windows (`ldxr`/`stxr`), timers (`cntpct`, `cntfrq`), cache maintenance, and system registers.
-- Run `python3 dm/tools/patch_nso.py <nso> <out dir> <name>` and check that its counts match the census. New system registers appear with new SDKs: SDK 16 reads `CTR_EL0` (macOS traps it), now rewritten to a constant.
+- `dm/tools/insn_census.py <module.nso> [--sites tsv]` counts the sites the rewriter finds by a linear sweep: `svc` (with numbers), `mrs/msr` of `tpidr_el0` / `tpidrro_el0` and the counters (`cntpct`, `cntvct`, `cntfrq`, `cntpctss`, `cntvctss`), any `x18` use and `sub sp, sp, xN`. It does not count exclusive windows, cache maintenance, other system registers, PAC or MTE: for those sweep the module with `llvm-objdump` ([Switch 2 code](../reference/rewriter.md#switch-2-code-the-instructions-capstone-5-leaves-undecoded)).
+- Run `python3 dm/tools/patch_nso.py <nso> <out dir> <name>` and check that its `<name>.sites.tsv` matches the census (by address: `x18` sites plus the `br x18` tables, `J` / `T` rows, against the census's `x18 use`). New system registers appear with new SDKs: SDK 16 reads `CTR_EL0` (macOS traps it), now rewritten to a constant.
 - Mario's SVC set was a subset of D2R's. A new SVC needs a case in `hle_svc.c` / `hle_thread.c`; the default case logs `SVC %#x … (placeholder returns success)` once and returns success, which is wrong for anything that returns data.
 
 ## NVN surface
