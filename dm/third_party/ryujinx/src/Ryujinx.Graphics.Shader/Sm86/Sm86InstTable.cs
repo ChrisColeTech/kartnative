@@ -22,13 +22,19 @@ namespace Ryujinx.Graphics.Shader.Sm86
         Ret = 1 << 5,
         Brx = 1 << 6,
 
-        /// <summary>Writes the GPR in bits 16-23 (the BRX jump-table tracker follows these).</summary>
+        /// <summary>
+        /// Writes the register in bits 16-23: the GPR, or the UR on Uniform rows (the BRX / BRXU jump-table trackers follow these). Not for operations whose
+        /// only output is a predicate (ISETP, UISETP).
+        /// </summary>
         Rd = 1 << 8,
 
         // Attribute accesses, whose attribute usage the decoder records (as Decoder does for ALD / AST / IPA).
         AttrLoad = 1 << 9,
         AttrStore = 1 << 10,
         Ipa = 1 << 11,
+
+        /// <summary>A warp operation (P guard, GPR sources) that writes the UR in bits 16-21: R2UR, REDUX.</summary>
+        URd = 1 << 12,
 
         BlockEnd = Branch | Exit | Call | Ret | Brx,
     }

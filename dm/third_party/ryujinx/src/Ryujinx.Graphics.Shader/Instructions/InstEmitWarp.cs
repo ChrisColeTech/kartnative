@@ -67,7 +67,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        private static Operand EmitVote(EmitterContext context, VoteMode voteMode, Operand pred)
+        // nxnative: internal, the SM86 VOTE / MATCH / REDUX emitters share EmitVote and EmitBallot (Sm86/Sm86Emit.Warp.cs).
+        internal static Operand EmitVote(EmitterContext context, VoteMode voteMode, Operand pred)
         {
             int subgroupSize = context.TranslatorContext.GpuAccessor.QueryHostSubgroupSize();
 
@@ -101,7 +102,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             };
         }
 
-        private static Operand EmitBallot(EmitterContext context, Operand pred)
+        internal static Operand EmitBallot(EmitterContext context, Operand pred)
         {
             int subgroupSize = context.TranslatorContext.GpuAccessor.QueryHostSubgroupSize();
 
