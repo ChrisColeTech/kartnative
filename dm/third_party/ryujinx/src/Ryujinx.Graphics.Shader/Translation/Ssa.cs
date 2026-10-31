@@ -8,6 +8,8 @@ namespace Ryujinx.Graphics.Shader.Translation
     static class Ssa
     {
         private const int GprsAndPredsCount = RegisterConsts.GprsCount + RegisterConsts.PredsCount;
+        private const int UniformGprsBase = GprsAndPredsCount + RegisterConsts.FlagsCount;
+        private const int UniformPredsBase = UniformGprsBase + RegisterConsts.UniformGprsCount;
 
         private class DefMap
         {
@@ -350,9 +352,17 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return RegisterConsts.GprsCount + reg.Index;
             }
-            else /* if (reg.Type == RegisterType.Flag) */
+            else if (reg.Type == RegisterType.Flag)
             {
                 return GprsAndPredsCount + reg.Index;
+            }
+            else if (reg.Type == RegisterType.UniformGpr)
+            {
+                return UniformGprsBase + reg.Index;
+            }
+            else /* if (reg.Type == RegisterType.UniformPredicate) */
+            {
+                return UniformPredsBase + reg.Index;
             }
         }
 
@@ -366,9 +376,17 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return new Register(key - RegisterConsts.GprsCount, RegisterType.Predicate);
             }
-            else /* if (key < RegisterConsts.TotalCount) */
+            else if (key < UniformGprsBase)
             {
                 return new Register(key - GprsAndPredsCount, RegisterType.Flag);
+            }
+            else if (key < UniformPredsBase)
+            {
+                return new Register(key - UniformGprsBase, RegisterType.UniformGpr);
+            }
+            else /* if (key < RegisterConsts.TotalCount) */
+            {
+                return new Register(key - UniformPredsBase, RegisterType.UniformPredicate);
             }
         }
     }
