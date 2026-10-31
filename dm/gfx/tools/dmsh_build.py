@@ -68,6 +68,42 @@ template<typename V, typename T, typename... A> static inline __attribute__((alw
     return r;
 }}
 '''
+def shared_spill(msl):
+    """A kernel whose threadgroup arrays exceed Metal's threadgroup memory (abi.SHARED_MAX: Apple GPUs; NVN2 compute declares up to 48 KB) → (msl, slice bytes) with the largest
+    arrays moved into a device buffer at buffer(abi.SPILL_BUFFER), one slice per threadgroup, and the device scope added to every threadgroup barrier so the slice is ordered
+    as threadgroup memory would be; (msl, 0) when they fit. A workaround for the platform limit: the device slice is slower than threadgroup memory, and the host must bind a
+    buffer of slice × the dispatch's threadgroup count (nvn_mtl.m). Mario Kart World's 168 programs of 48 KB index it by the global thread index times uniform values, so
+    their real use cannot be bounded at build time. ValueError on a use the rewrite does not cover (an atomic or an address of a moved array)"""
+    decls = list(re.finditer(r'^(\s*)threadgroup (spvUnsafeArray<(\w+), (\d+)>) (\w+);\n', msl, re.M))
+    size = {'uint': 4, 'int': 4, 'float': 4, 'uint2': 8, 'int2': 8, 'float2': 8, 'uint4': 16, 'int4': 16, 'float4': 16}
+    arrays = [(size.get(m.group(3), 0) * int(m.group(4)), m) for m in decls]
+    if any(not b for b, _ in arrays): raise ValueError('a threadgroup array of an element type shared_spill does not size')
+    total, moved = sum(b for b, _ in arrays), []
+    for b, m in sorted(arrays, key=lambda a: -a[0]):
+        if total <= abi.SHARED_MAX: break
+        moved.append((b, m)); total -= b
+    if not moved: return msl, 0
+    entry = re.search(r'kernel void main0\(([^\n]*)\)\n\{\n', msl)
+    if not entry: raise ValueError('threadgroup memory past the limit outside a kernel main0')
+    slice_, off, decl = 0, {}, {}
+    for b, m in sorted(moved, key=lambda a: a[1].start()):
+        name = m.group(5)
+        if re.search(r'&\s*%s\b|threadgroup atomic_\w+\*\)\s*&?\s*%s\b' % (name, name), msl): raise ValueError(f'{name}: an address or atomic of a threadgroup array shared_spill moves')
+        off[name] = slice_; slice_ += (b + 15) // 16 * 16
+        decl[m.start()] = (m.end(), f'{m.group(1)}device {m.group(2)}& {name} = *(device {m.group(2)}*)(dm_spill + dm_tg * {{slice}}u + {off[name]}u);\n')
+    out, pos = [], 0
+    for start in sorted(decl):
+        end, text = decl[start]; out.append(msl[pos:start] + text.format(slice=slice_)); pos = end
+    msl = ''.join(out) + msl[pos:]
+    params = entry.group(1)
+    gid = re.search(r'uint3 (\w+) \[\[threadgroup_position_in_grid\]\]', params)
+    extra = f', device uchar* dm_spill [[buffer({abi.SPILL_BUFFER})]], uint3 dm_tgs [[threadgroups_per_grid]]' + ('' if gid else ', uint3 dm_tgp [[threadgroup_position_in_grid]]')
+    tg = gid.group(1) if gid else 'dm_tgp'
+    msl = msl.replace(entry.group(0), f'kernel void main0({params}{extra})\n{{\n    uint dm_tg = ({tg}.z * dm_tgs.y + {tg}.y) * dm_tgs.x + {tg}.x;\n', 1)
+    msl = re.sub(r'threadgroup_barrier\(mem_flags::mem_threadgroup\)', 'threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device)', msl)
+    if re.search(r'threadgroup_barrier\((?!mem_flags::mem_threadgroup \| mem_flags::mem_device\))', msl): raise ValueError('a threadgroup barrier of a form shared_spill does not widen')
+    return msl, slice_
+
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
     the source unchanged when it samples through none. Only samples of float textures: an integer texture is not filtered, and its border colour is Maxwell's integer one, which
@@ -1189,6 +1225,11 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
+    spill = 0
+    if j['stage'] == 'cs':   # threadgroup memory past Metal's limit goes to a device slice per threadgroup (see shared_spill)
+        try: src, spill = shared_spill(src)
+        except ValueError as e: return 'shared spill failed', str(e)[:160], None
+        if spill: open(msl, 'w').write(src)
     if j['stage'] in ('ts', 'ms'):   # the translator's kernel as a Metal object / mesh function (dmsh_mesh.taskmesh)
         try: src = dmsh_mesh.taskmesh(src, j['mesh'])
         except ValueError as e: return 'mesh compose failed', str(e)[:160], None
@@ -1237,7 +1278,7 @@ def finish(key, w, j, c1):
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
-            'bindings': binds, **({abi.C0P_KEY: c0p_json(pack)} if pack else {}),
+            'bindings': binds, **({abi.C0P_KEY: c0p_json(pack)} if pack else {}), **({abi.SPILL_KEY: spill} if spill else {}),
             **({'msl_entry_kind': 'object' if j['stage'] == 'ts' else 'mesh', 'mesh': j['mesh'], **({'entry_z': 'main0_z'} if j['stage'] == 'ms' else {})} if j['stage'] in ('ts', 'ms') else {}),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

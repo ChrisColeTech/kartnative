@@ -13,7 +13,7 @@ TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # noqa: E402
 
-FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'c2_array', 'pool_arrays', 'reflect', 'c0p_json', 'c0p_slot', 'decode_tex_c0p'}
+FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'c2_array', 'pool_arrays', 'reflect', 'c0p_json', 'c0p_slot', 'decode_tex_c0p', 'shared_spill'}
 NAMES = {'POOL_MIN', 'TEX_BASE', 'SSBO', 'C0P_TABLES'}
 
 
@@ -86,6 +86,28 @@ class Reflect(unittest.TestCase):
                              'cp_t_cb0_6ESmplr': (abi.KIND_SAMP_TEX, 9), 'cp_i_cb0_84_r32f': (abi.KIND_IMG, 1)})
         self.assertEqual(NS['c0p_json'](pack), {'size': 0x218, 'rows': [[abi.KIND_CBUF, 0, 0x10, 13], [abi.KIND_SBUF, 0, 0xe0, 9], [abi.KIND_TEX, 0, 0x170, 19], [abi.KIND_IMG, 0, 0x208, 2]]})
         self.assertIsNone(NS['decode_tex_c0p']('cp_t_cb0_6F', pack)[0], 'a word inside an entry is no slot')
+
+
+class SharedSpill(unittest.TestCase):   # threadgroup memory past Metal's limit (dmsh_abi.h DMSH_SHARED_MAX): Mario Kart World's 48 KB compute programs
+    K = ('kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])\n{\n'
+         '    threadgroup spvUnsafeArray<uint, 12288> _39;\n    threadgroup spvUnsafeArray<float, 64> _40;\n    _39[gl_LocalInvocationID.x] = 1u;\n'
+         '    threadgroup_barrier(mem_flags::mem_threadgroup);\n}\n')
+
+    def test_moves_the_largest_array(self):
+        out, n = NS['shared_spill'](self.K)
+        self.assertEqual(n, 12288 * 4)
+        self.assertIn('device spvUnsafeArray<uint, 12288>& _39 = *(device spvUnsafeArray<uint, 12288>*)(dm_spill + dm_tg * 49152u + 0u);', out)
+        self.assertIn('threadgroup spvUnsafeArray<float, 64> _40;', out)
+        self.assertIn(f'device uchar* dm_spill [[buffer({abi.SPILL_BUFFER})]], uint3 dm_tgs [[threadgroups_per_grid]], uint3 dm_tgp [[threadgroup_position_in_grid]])', out)
+        self.assertIn('uint dm_tg = (dm_tgp.z * dm_tgs.y + dm_tgp.y) * dm_tgs.x + dm_tgp.x;', out)
+        self.assertIn('threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);', out)
+
+    def test_fits(self):
+        small = self.K.replace('12288', '4096')
+        self.assertEqual(NS['shared_spill'](small), (small, 0))
+
+    def test_atomic_stops(self):
+        with self.assertRaises(ValueError): NS['shared_spill'](self.K.replace('    _39[gl', '    atomic_fetch_add_explicit((threadgroup atomic_uint*)&_39[0], 1u, memory_order_relaxed);\n    _39[gl'))
 
 
 if __name__ == '__main__':

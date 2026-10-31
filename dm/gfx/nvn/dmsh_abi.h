@@ -95,3 +95,11 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+
+// Threadgroup memory past Metal's limit (dmsh_build.py shared_spill): Apple GPUs give a threadgroup at most DMSH_SHARED_MAX bytes, NVN2 compute programs declare up to 48 KB
+// (Mario Kart World: 168 programs, control +0x64 = 0xc000, their indices depend on uniform data so no smaller bound is provable). The build moves the largest threadgroup
+// arrays of such a kernel into a device buffer, one slice per threadgroup (index (z * groups y + y) * groups x + x), and adds the device scope to its barriers; the reflection
+// gives the slice bytes as DMSH_SPILL_KEY, and the host binds a buffer of slice × the dispatch's threadgroup count at compute buffer index DMSH_SPILL_BUFFER
+#define DMSH_SHARED_MAX 32768            // bytes of threadgroup memory a Metal kernel may use
+#define DMSH_SPILL_KEY "shared_spill"    // the reflection json member: bytes of one threadgroup's slice
+#define DMSH_SPILL_BUFFER 28             // the compute buffer index of the spill buffer
