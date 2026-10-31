@@ -269,6 +269,15 @@ namespace Ryujinx.Graphics.Shader.Sm86
             {
                 // IPA: attribute word address in bits 64-71; bit 91 adds the uniform register in bits 24-29 (an indexed access, opcode 0x526).
                 Decoder.SetUserAttributeUses(definitions, context, inst.Field(64, 8) * 4, 1, false, inst.Bit(91), false);
+
+                // Location in bits 76-77 (default, centroid, offset): a centroid read of a user attribute declares that input centroid. MKW reads no
+                // attribute both with and without centroid, and its indexed IPAs (0x526) all use the default location.
+                int address = inst.Field(64, 8) * 4;
+
+                if (inst.Field(76, 2) == 1 && !inst.Bit(91) && address is >= AttributeConsts.UserAttributeBase and < AttributeConsts.UserAttributeEnd)
+                {
+                    definitions.SetCentroidInput((address - AttributeConsts.UserAttributeBase) >> 4);
+                }
             }
         }
     }

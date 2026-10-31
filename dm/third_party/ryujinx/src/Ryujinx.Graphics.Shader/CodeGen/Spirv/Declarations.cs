@@ -636,6 +636,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         context.Decorate(spvVar, Decoration.NoPerspective);
                         break;
                 }
+
+                // nxnative: SM86 IPA reads at the centroid (ShaderDefinitions.CentroidInputs; never set for Maxwell programs).
+                if (iq is PixelImap.Perspective or PixelImap.ScreenLinear &&
+                    ioVariable == IoVariable.UserDefined &&
+                    (context.Definitions.CentroidInputs & (1u << ioDefinition.Location)) != 0)
+                {
+                    context.Decorate(spvVar, Decoration.Centroid);
+                }
             }
             else if (context.Definitions.TryGetTransformFeedbackOutput(
                 ioVariable,

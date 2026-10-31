@@ -51,6 +51,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         public bool IaIndexing { get; private set; }
         public bool OaIndexing { get; private set; }
 
+        // nxnative: user input attributes (bit = location) a fragment program interpolates at the centroid. Only the SM86 frontend sets it (IPA's location
+        // field); Maxwell programs carry no interpolation location, so their inputs stay undecorated.
+        public uint CentroidInputs { get; private set; }
+
         public int OmapTargets { get; }
         public bool OmapSampleMask { get; }
         public bool OmapDepth { get; }
@@ -217,6 +221,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         public void EnableOutputIndexing()
         {
             OaIndexing = true;
+        }
+
+        public void SetCentroidInput(int location)
+        {
+            CentroidInputs |= 1u << location;
         }
 
         public bool TryGetTransformFeedbackOutput(IoVariable ioVariable, int location, int component, out TransformFeedbackOutput transformFeedbackOutput)
