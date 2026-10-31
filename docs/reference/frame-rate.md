@@ -227,6 +227,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Note:** a 120 Hz link instead (`DM_PRESENT_LINK=2`, a frame every other tick, latency 1: 16.6 ms of lead) kept the frame step at its cost in three runs, but the system still showed 102–209 of about 9,600 presents one refresh late, against 17–19 at latency 2; so a steady panel rate does not remove the misses.
 - **Not checked:** other games here; Mario Kart 8 Deluxe on the M4 with latency 2; screens other than the built-in ProMotion ones; entering and leaving fullscreen while a game runs (only `t_present_rescue`); `scripts/regress.py`.
 
+### Switch 2 display queries: no VRR, SDR
+
+- **Symptom:** none seen; found by reading the imports before a Switch 2 game got that far. The SDK's display queries check the display against their own vi2 object and answer 0x272 for the host's, leaving their outputs unwritten (the game reads whatever its stack held: sdk+0x536710 in Mario Kart World), and the layer functions call straight into the vi2 service the host never made.
+- **Cause:** Mario Kart World imports `QueryDisplayVrrSupported`, `SetDisplayVrrCapability`, `Set/ClearLayerExtendedSwapInterval`, `QueryDisplayHdrStatus`, `QueryDisplayHdrPaperWhite` and the layer's two HDR content-luminance setters, beside the `OpenDefaultDisplay` / `CreateLayer` / `GetNativeWindow` / `GetDisplayVsyncEvent` the host already answered. With VRR supported and a frame-rate setting of 40 or more it sets the display's VRR capability and the layer's extended swap interval (layer, 1, rate); otherwise it clears both (main+0x226cdcc..+0x226ce38).
+- **Fix:** `hle_vi.c` answers them as the display the host presents to: no VRR (so the game takes its clear path and paces by the window's present interval, `nvnWindowSetPresentInterval`, as any NVN game), HDR off with 100 cd/m² (the BT.709 / BT.1886 SDR reference) for both the status's maximum luminance and the paper white, rather than a 0 a division could meet; the setters are logged once and ignored. The window's own NVN2 HDR calls end in no-ops in the driver too (nvn2.md, Window function table).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (`vi::QueryDisplayHdrStatus: HDR off` in its first runs; the window's present interval goes 1 → 2 → 1 during start-up).
+- **Not checked:** whether MKW reads the luminance values with HDR off (no reader found near main+0x226ce40).
+
 ## CPU cost and pacing
 
 ### Arena buffer ownership on allocation
