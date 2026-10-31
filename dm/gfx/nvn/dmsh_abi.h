@@ -27,6 +27,8 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table (Mario Kart World's task programs read 0x670 + 0x10 r)
+#define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table (its mesh programs read 0x770 .. 0x7b0)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table

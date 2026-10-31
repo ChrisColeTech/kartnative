@@ -8,8 +8,9 @@
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
-# Switch 2 (NVN2) records are SM86 programs, which the translator reads with its SM86 frontend (sm86_code); task and mesh programs have no translation yet, and an SM86 program the frontend
-# did not translate whole gets no library (sm86_blockers): the summary counts both, per stage, with a histogram of what stopped them. DMSH_KEEP_WORK=1 keeps the work folder (jobs, code, SPIR-V, res.json)
+# Switch 2 (NVN2) records are SM86 programs, which the translator reads with its SM86 frontend (sm86_code); task and mesh programs become Metal object and mesh functions
+# (dmsh_mesh.layout / taskmesh), and an SM86 program the frontend did not translate whole gets no library (sm86_blockers): the summary counts per stage, with a histogram of what
+# stopped them. DMSH_KEEP_WORK=1 keeps the work folder (jobs, code, SPIR-V, res.json)
 import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
@@ -119,9 +120,9 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 #   c2 C2_IMG + 8 r: images (nvnCommandBufferBindImage), slot r < C2_IMG_SLOTS
 #   c2 C2_SEPTEX + 8 r: separate textures (nvnCommandBufferBindSeparateTexture), reported as slot SEPTEX_SLOT0 + r, where the host binds them (hle_nvn.c, NVN_SEPTEX_SLOT0)
 #   c2 C2_SAMP + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < C2_SEP_SLOTS
-#   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
+#   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (NVN2 task and mesh stages too; the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
-SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS}
+SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -460,7 +461,11 @@ def sm86_control(rec):
 
 def job_for(key, name, rec, w):
     sm86 = sm86_code(rec)
-    if sm86: (stage, code, c1), extra = sm86, {'isa': 'sm86'}
+    if sm86:
+        (stage, code, c1), extra = sm86, {'isa': 'sm86'}
+        if stage in ('ts', 'ms'):   # task / mesh: the layout from the control and the whole code area (a mesh program's second header lies past +0x38); ValueError on a form it does not know
+            ctl, area = sm86_control(rec)
+            lay = dmsh_mesh.layout(ctl, area); extra.update(mesh=lay, local=lay['local'])
     else:
         ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
@@ -1184,6 +1189,10 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
+    if j['stage'] in ('ts', 'ms'):   # the translator's kernel as a Metal object / mesh function (dmsh_mesh.taskmesh)
+        try: src = dmsh_mesh.taskmesh(src, j['mesh'])
+        except ValueError as e: return 'mesh compose failed', str(e)[:160], None
+        open(msl, 'w').write(src)
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
@@ -1229,6 +1238,7 @@ def finish(key, w, j, c1):
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds, **({abi.C0P_KEY: c0p_json(pack)} if pack else {}),
+            **({'msl_entry_kind': 'object' if j['stage'] == 'ts' else 'mesh', 'mesh': j['mesh'], **({'entry_z': 'main0_z'} if j['stage'] == 'ms' else {})} if j['stage'] in ('ts', 'ms') else {}),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
@@ -1269,19 +1279,18 @@ for key in keys: recs[key] = rec_of(key); digests[key] = shader_key(key, *recs[k
 def plain_digest(k):   # a paired pixel shader's key, also when it is not built this time
     if k in digests: return digests[k]
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
-# Stages the translator has no output for: a Switch 2 program's task and mesh stages (NVN2, nvnCommandBufferDrawMeshTasks) are counted and left without a library
-NO_STAGE = {'ts': 'task', 'ms': 'mesh'}
-untranslated = {key for key in keys if loc[key][0][:2] in NO_STAGE}
+job_err = {}   # a program no job could be made for (a task or mesh layout of a form dmsh_mesh.layout does not know): reported as a translation failure
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
 for key in keys:
     name, rec = recs[key]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
-    if key in untranslated: continue
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
-    else: jobs[key], c1s[key] = job_for(key, name, rec, w)
-misses = [key for key in keys if key not in cache_hits and key not in untranslated]
+    else:
+        try: jobs[key], c1s[key] = job_for(key, name, rec, w)
+        except ValueError as e: job_err[key] = str(e)[:160]
+misses = [key for key in keys if key not in cache_hits and key not in job_err]
 # An SM86 program the translator could not translate whole: the frontend logs an instruction it has no emitter for, or a variant its emitter does not implement, and emits
 # nothing for it (docs/reference/shaders-sm86.md); BRX targets or a call target it cannot find leave the control flow wrong, and a global memory access through a pointer
 # no storage buffer slot gives (GlobalToStorage) is dropped. Such a program gets no library: drawn with instructions missing it would render wrong. Its items (opcode or
@@ -1312,7 +1321,7 @@ def fin(key):
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
         return key, 'ok', '', fetch_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl)))
-    if key in untranslated: return key, 'not translated', f'{NO_STAGE[loc[key][0][:2]]} stage: the translator has no task or mesh stage', None
+    if key in job_err: return key, 'translation failed', job_err[key], None
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     if jobs[key].get('isa') == 'sm86':
         blocked = sm86_blockers(json.load(open(os.path.join(w, key + '.res.json')))['notes'])
@@ -1348,7 +1357,6 @@ print(f'shaders {len(res)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in 
 by_stage = collections.defaultdict(collections.Counter)   # by the package's stage prefix (shader_split.py: vs, ps, cs, gs, ...; Switch 2 also ts task, ms mesh)
 for r in res: by_stage[loc[r[0]][0][:2]][r[1]] += 1
 for _s, _c in sorted(by_stage.items()): print(f'  {_s}: {sum(_c.values())}, ok {_c["ok"]}' + ''.join(f', {k} {v}' for k, v in _c.items() if k != 'ok'))
-if untranslated: print(f'[RED] {len(untranslated)} task / mesh programs not translated (' + ', '.join(f'{v} {sum(loc[k][0][:2] == s for k in untranslated)}' for s, v in NO_STAGE.items()) + '): the translator has no task or mesh stage, so they have no library', flush=True)
 if SM86_BLOCKED:   # per item: the programs it is in, and those it alone keeps from translating
     print(f'[RED] {len(SM86_BLOCKED)} SM86 programs not translated whole, so without a library; what the translator did not translate: programs with it, programs with only it', flush=True)
     _sole = collections.Counter(next(iter(b)) for b in SM86_BLOCKED.values() if len(b) == 1)

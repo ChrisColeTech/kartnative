@@ -80,6 +80,10 @@ class Header(unittest.TestCase):
         for lo, hi in zip(bases, bases[1:]): self.assertLessEqual(lo + a.C0_ROW * a.C0_SSBO_SLOTS, hi, 'storage buffer tables overlap')
         self.assertLessEqual(bases[-1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_POINT_SIZE)
         self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.DRV_SIZE)
+        nvn2 = sorted((a.C0_SSBO_TS, a.C0_SSBO_MS))   # NVN2 task and mesh tables: after the graphics words, inside the buffer the host fills
+        self.assertLessEqual(a.C0_BASE_INSTANCE + 4, nvn2[0])
+        self.assertLessEqual(nvn2[0] + a.C0_ROW * a.C0_SSBO_SLOTS, nvn2[1])
+        self.assertLessEqual(nvn2[1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.DRV_SIZE)
 
 
 class Build(unittest.TestCase):
@@ -92,7 +96,7 @@ class Build(unittest.TestCase):
         exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
         self.assertEqual((ns['TEX_BASE'], ns['IMG_BASE'], ns['IMG_SLOTS'], ns['SEPTEX_BASE'], ns['SEPTEX_SLOT0'], ns['SAMP_BASE']),
                          (abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP))
-        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS})
+        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_nvn2_compute_c0_agrees(self):   # the driver's packed compute c0 as nvn2_shader.py reads it, and the json rows the build gives the host (dmsh_abi.h DMSH_C0P_KEY)

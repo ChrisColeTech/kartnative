@@ -5,8 +5,9 @@
 //   Link's Awakening / 13 Sentinels / Engage set near=0), so dmsh_build.py adds the GL rewrite z' = z/2 + w/2 in the MSL as two entry points, main0 (rewritten, GL) and main0_z (unchanged, near=0), and the host picks by the game's convention.
 //   This used to rewrite for GL always: a near=0 game's depth was squeezed into 0.5..1, and effects that turn depth into distance (Link's Awakening's outdoor depth of field blurring the whole screen, occlusion) were all wrong.
 // Usage: dmsh_xlate <job.json> <output dir>
-//   Job: [{ "key", "stage": "vs|ps|cs", "code": machine code file (graphics = 0x50-byte SPH + instructions, compute = instructions),
-//           "isa": "sm86" for a Switch 2 (NVN2) program (TranslationFlags.Sm86: graphics code = the 0x80-byte NVN2 program header + SM86 instructions, compute = instructions; absent = Maxwell),
+//   Job: [{ "key", "stage": "vs|ps|cs|ts|ms", "code": machine code file (graphics = 0x50-byte SPH + instructions, compute = instructions),
+//           "isa": "sm86" for a Switch 2 (NVN2) program (TranslationFlags.Sm86: graphics code = the 0x80-byte NVN2 program header + SM86 instructions, compute = instructions; absent = Maxwell;
+//           stage ts / ms add TranslationFlags.Sm86Task / Sm86Mesh), "mesh": a task or mesh program's layout (dmsh_mesh.layout: isbe_out / isbe_map / isbe_in, the ISBE region sizes),
 //           "tex": { "slot": "2d|2darray|cube|cubearray|3d|buffer|1d|1darray|2dms|2dmsarray", ... }, "img": { "slot": { "type", "fmt" } },
 //           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z] }]
 //   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; decoding texture handle → slot number is done in the script that builds the metallib;
@@ -115,6 +116,11 @@ static class SwshXlate
         public int QueryComputeLocalSizeY() => Local(1);
         public int QueryComputeLocalSizeZ() => Local(2);
         public int QueryComputeSharedMemorySize() => _job["shared"] is JsonNode n ? (int)n : 0;   // the shared memory size in the compute shader's control section (shader_split.py)
+        // a task or mesh program's ISBE regions (dmsh_mesh.layout, the job's "mesh"): output bytes, map entries, input bytes; 0 for other programs
+        int Isbe(string k) => _job["mesh"] is JsonObject m && m[k] is JsonNode n ? (int)n : 0;
+        public int QuerySm86IsbeOutputSize() => Isbe("isbe_out");
+        public int QuerySm86IsbeMapEntries() => Isbe("isbe_map");
+        public int QuerySm86IsbeInputSize() => Isbe("isbe_in");
         static AttributeType Attr(string s) => s switch { "sint" => AttributeType.Sint, "uint" => AttributeType.Uint, _ => AttributeType.Float };
         public bool QueryGeometryInputFixed() => _job["geometry_topology"] != null;
         // Compute lowering must emit passthrough vertices explicitly: Metal
@@ -171,7 +177,8 @@ static class SwshXlate
                 var acc = new Accessor(code, job);
                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
                 var flags = TranslationFlags.MetalImageAtomics | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0)
-                    | ((string)job["isa"] switch { null => TranslationFlags.None, "sm86" => TranslationFlags.Sm86, string isa => throw new ArgumentException($"unknown isa \"{isa}\" in the job") });
+                    | ((string)job["isa"] switch { null => TranslationFlags.None, "sm86" => TranslationFlags.Sm86, string isa => throw new ArgumentException($"unknown isa \"{isa}\" in the job") })
+                    | ((string)job["isa"] == "sm86" ? (string)job["stage"] switch { "ts" => TranslationFlags.Sm86Task, "ms" => TranslationFlags.Sm86Mesh, _ => TranslationFlags.None } : TranslationFlags.None);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 bool geometry = job["geometry_topology"] != null;
                 ShaderProgram p = ctx.Translate(geometry);
