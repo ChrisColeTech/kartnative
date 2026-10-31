@@ -3,7 +3,8 @@
 //       Translates each program to <out>/<key>.spv (and with --msl <key>.metal through spirv-cross, with --metal compiles it with xcrun metal).
 //       SM86 graphics programs are the 128-byte NVN2 header + 16-byte instructions, compute programs the instructions only; the stage comes from
 //       <key>.meta.json beside the file (ShaderExtract's dump, $W/shader/sm86) or --stage vs|ps|cs. Maxwell programs are the dmsh_xlate layout (0x50-byte SPH + code).
-//       Task and mesh programs are skipped (the translator has no such stages). A program is complete when the translator left no note that makes
+//       Task and mesh programs translate as kernels with their ISBE regions in shared memory (TranslationFlags.Sm86Task / Sm86Mesh; sizes from the meta's
+//       control section, MeshLayout); with --msl dmsh_mesh.py makes their object / mesh function. A program is complete when the translator left no note that makes
 //       the chain drop it (an unsupported instruction, "is not implemented"...); the summary counts complete programs per stage (and those whose MSL
 //       compiled), lists the opcodes and notes that keep the others out (programs each), and --complete writes the complete programs' paths. MSL
 //       and AIR are made for complete programs only, or with --all for every program (to check new emitters in programs other families still block).
@@ -44,12 +45,19 @@ sealed class Accessor : IGpuAccessor
     /// <summary>Declares colour target 0 as unsigned integer (GPU tests read raw register bits back).</summary>
     public bool UintColor0;
 
+    /// <summary>A task or mesh program's ISBE sizes (IGpuAccessor.QuerySm86Isbe*): output bytes, map entries, input bytes.</summary>
+    public int IsbeOutput, IsbeMap, IsbeInput;
+
     public Accessor(byte[] code, byte[] c1 = null, int[] local = null)
     {
         _code = code;
         _c1 = c1 ?? Array.Empty<byte>();
         _local = local ?? new[] { 1, 1, 1 };
     }
+
+    public int QuerySm86IsbeOutputSize() => IsbeOutput;
+    public int QuerySm86IsbeMapEntries() => IsbeMap;
+    public int QuerySm86IsbeInputSize() => IsbeInput;
 
     public uint ConstantBuffer1Read(int offset) => offset >= 0 && offset + 4 <= _c1.Length ? BitConverter.ToUInt32(_c1, offset) : 0;
     public void Log(string message) => Notes.Add(message);
@@ -256,16 +264,37 @@ static class Harness
         string stage = stageArg ?? (string)meta["stage"] ?? "vs";
         var r = new Result { Stage = stage };
 
+        byte[] c1Bytes = File.Exists(Path.ChangeExtension(file, ".c1.bin")) ? File.ReadAllBytes(Path.ChangeExtension(file, ".c1.bin")) : null;
+        int[] local = meta["local_size"] is JsonArray la ? la.Select(x => (int)x).ToArray() : null;
+        JsonObject layout = null;
+
         if (stage is "task" or "mesh")
         {
+#if BASELINE
             r.Skipped = true;
             r.Line = $"{key} ({stage}): skipped";
             return r;
+#else
+            // The program's layout (threads, ISBE sizes, its outputs) from its control section and whole code area, as the chain computes it (dmsh_mesh.py layout)
+            try
+            {
+                layout = JsonNode.Parse(RunCapture("python3", new[] { DmshMesh(), "layout", metaPath, file })).AsObject();
+                local = layout["local"].AsArray().Select(x => (int)x).ToArray();
+            }
+            catch (Exception e)
+            {
+                r.Line = $"[RED] {key} ({stage}): layout: {e.Message.Split('\n')[0]}";
+                return r;
+            }
+#endif
         }
 
-        byte[] c1Bytes = File.Exists(Path.ChangeExtension(file, ".c1.bin")) ? File.ReadAllBytes(Path.ChangeExtension(file, ".c1.bin")) : null;
-        int[] local = meta["local_size"] is JsonArray la ? la.Select(x => (int)x).ToArray() : null;
         var acc = new Accessor(File.ReadAllBytes(file), c1Bytes, local);
+
+        if (layout != null)
+        {
+            (acc.IsbeOutput, acc.IsbeMap, acc.IsbeInput) = ((int)layout["isbe_out"], (int)layout["isbe_map"], (int)layout["isbe_in"]);
+        }
 
         try
         {
@@ -281,7 +310,7 @@ static class Harness
 #if BASELINE
                 throw new NotSupportedException("this build has no SM86 frontend");
 #else
-                flags |= TranslationFlags.Sm86;
+                flags |= TranslationFlags.Sm86 | stage switch { "task" => TranslationFlags.Sm86Task, "mesh" => TranslationFlags.Sm86Mesh, _ => 0 };
 #endif
             }
 
@@ -296,8 +325,17 @@ static class Harness
             if (msl && (r.Missing.Count == 0 || compileIncomplete))
             {
                 string mslPath = Path.Combine(outDir, key + ".metal");
-                Run(spirvCross, new[] { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output", spv, "--output", mslPath });
+                string crossPath = layout != null ? Path.Combine(outDir, key + ".kernel.metal") : mslPath;
+                Run(spirvCross, new[] { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output", spv, "--output", crossPath });
                 result += ", msl ok";
+
+                if (layout != null)   // the kernel as an object / mesh function (dmsh_mesh.py taskmesh)
+                {
+                    string layoutPath = Path.Combine(outDir, key + ".layout.json");
+                    File.WriteAllText(layoutPath, layout.ToJsonString());
+                    Run("python3", new[] { DmshMesh(), "taskmesh", crossPath, layoutPath, mslPath });
+                    result += $", {stage} function ok";
+                }
 
                 if (metal)
                 {
@@ -356,7 +394,15 @@ static class Harness
         return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourcePath), "../spirv_cross_bin/spirv-cross"));
     }
 
-    internal static void Run(string exe, string[] args)
+    // The in-repo dmsh_mesh.py (task / mesh layouts and functions), found as spirv-cross is
+    internal static string DmshMesh([System.Runtime.CompilerServices.CallerFilePath] string sourcePath = "")
+    {
+        return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourcePath), "../dmsh_mesh.py"));
+    }
+
+    internal static void Run(string exe, string[] args) => RunCapture(exe, args);
+
+    internal static string RunCapture(string exe, string[] args)
     {
         var psi = new ProcessStartInfo(exe) { RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (string a in args)
@@ -365,13 +411,16 @@ static class Harness
         }
 
         using var proc = Process.Start(psi);
+        var stderrTask = proc.StandardError.ReadToEndAsync();
         string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
+        string stderr = stderrTask.Result;
         proc.WaitForExit();
 
         if (proc.ExitCode != 0)
         {
             throw new InvalidOperationException($"{Path.GetFileName(exe)} failed ({proc.ExitCode}): {(stderr + stdout).Trim().Split('\n').FirstOrDefault()}");
         }
+
+        return stdout;
     }
 }
