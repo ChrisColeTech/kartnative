@@ -85,10 +85,11 @@ static unsigned nvn_apply_section(const char *sect, uint8_t *seen) {
     }
     return nim;
 }
+static uint8_t g_seen2[NVN_NFUNC];   // names with an NVN2 implementation (Switch 2 builds); the empty implementations below leave those alone
 static void nvn_init_slots(void) {
     static int done; if (done) return; done = 1;
     g_log = getenv("DM_NVN_LOG") != NULL;
-    static uint8_t seen[NVN_NFUNC], seen2[NVN_NFUNC];
+    static uint8_t seen[NVN_NFUNC], *seen2 = g_seen2;
     for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
     g_nsem = nvn_apply_section("swnvn", seen);
     // Switch 2 (NVN2): implementations whose ABI or semantics differ from NVN1 replace the NVN1 ones (nvn_impl.h); a Switch 1 build never applies them
@@ -1244,11 +1245,12 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         while (i < NVN_NFUNC && strcmp(nvn_names[i], g_nops[k])) i++;
         if (i == NVN_NFUNC) die("NVN empty implementation %s is not in main's name table", g_nops[k]);
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry) die("NVN %s has an implementation and is also listed as an empty implementation", g_nops[k]);
-        nvn_slot[i].fn = (void *)nvn_nop;
+        nvn_slot[i].fn = (void *)nvn_nop; nnop++;
+    unsigned nnop = 0;
     }
-    unsigned nnop = sizeof g_nops / sizeof *g_nops;
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)
     unsigned nbig = 0;
+        if (g_seen2[i]) continue;   // NVN2 implements it (nvn_impl.h)
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && nvn_slot[i].fn != (void *)nvn_nop && strncmp(nvn_names[i], "nvnCommandBuffer", 16)) {
             nvn_big_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_big_entry; nbig++;
