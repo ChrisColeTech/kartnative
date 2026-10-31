@@ -324,7 +324,7 @@ static class Harness
     }
 
     // The notes that make the chain drop a program (dmsh_build.py SM86_BLOCKING): an unsupported instruction counts by opcode, the others by their text.
-    static readonly System.Text.RegularExpressions.Regex BlockingNote = new(@"is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at");
+    static readonly System.Text.RegularExpressions.Regex BlockingNote = new(@"is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at|Failed to find storage buffer for global memory operation");
 
     static void Classify(Accessor acc, Result r)
     {
