@@ -45,6 +45,8 @@ The host's NVN reports 55.15, so `nnMain` leaves its graphics setup at `main+0xc
 
 ## Found on this game
 
+- [A vector register taken for the jump table index](../../../docs/reference/rewriter.md#a-vector-register-taken-for-the-jump-table-index): the rewrite of `main` stopped at `main+0xea4a8`.
+- [Switch 2 code: the instructions capstone 5 leaves undecoded](../../../docs/reference/rewriter.md#switch-2-code-the-instructions-capstone-5-leaves-undecoded). The modules read only `cntpct_el0` among the counters (40 gates in `sdk`), no `cntfrq` / `cntvct` / ID registers; one MTE `stg` in `sdk` (`sdk+0x74c160`, libunwind's stack retag, behind a flag).
 - [The Switch 2's 31.25 MHz system counter](../../../docs/reference/services.md#the-switch-2s-3125-mhz-system-counter) (found from the sdk before the first boot).
 - [The Switch 2 SDK's version string](../../../docs/reference/services.md#the-switch-2-sdks-version-string): a red line at load.
 - [The Switch 2 kernel's GetInfo ids 29 to 33](../../../docs/reference/memory.md#the-switch-2-kernels-getinfo-ids-29-to-33): an abort in `nninitInitializeSdkModule` (`MapPhysicalMemory` of size 0).
