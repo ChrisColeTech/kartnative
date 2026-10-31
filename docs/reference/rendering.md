@@ -927,7 +927,7 @@ What the host does with the command-buffer entries NVN2 adds or changes (`dm/gfx
 
 - **Symptom:** `[RED] NVN2 mesh-shader draw (DrawMeshTasks family, kind 0) skipped: the replay has no mesh path yet (n skipped so far)`; whatever those draws make (MKW's are task / mesh programs) is missing.
 - **Cause:** the replay has no task / mesh pipeline: the translator does not yet translate MKW's 7 task and 18 mesh programs, and Metal's mesh pipelines (object and mesh functions) are a pipeline kind of their own.
-- **Fix (partial):** every `DrawMeshTasks*` form is recorded with its arguments (`OP_MESH`; a direct draw's record stops before the indirect fields) and the capture walk covers its indirect records, so a mesh path needs only the replay. `SetGeometryProcessingMode`, with which MKW brackets each mesh draw (1 or 2 before, 0 after), is not recorded: the pipeline follows from the program a draw binds.
+- **Fix (partial):** every `DrawMeshTasks*` form is recorded with its arguments (`OP_MESH`; a direct draw's record stops before the indirect fields) and the capture walk covers its indirect records, so a mesh path (translated task / mesh programs and a Metal mesh pipeline in the replay) needs no change to the recording. `SetGeometryProcessingMode`, with which MKW brackets each mesh draw (1 or 2 before, 0 after), is not recorded: the pipeline follows from the program a draw binds.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (9 call sites, `first` 0, `count` = items / 32; a headless run skipped more than 512 of them in its first 212 frames).
 
 ### Variable-rate shading at the full rate
