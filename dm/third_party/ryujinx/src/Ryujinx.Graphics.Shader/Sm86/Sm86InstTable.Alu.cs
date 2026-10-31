@@ -58,6 +58,13 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("FSEL", 0x008, Sm86Forms.All, Sm86Emit.Fsel, Rd);
             Add("FSWZADD", 0x822, Sm86Emit.Fswzadd, Rd);
 
+            Add("HADD2", 0x030, Sm86Forms.All, Sm86Emit.Hadd2, Rd);
+            Add("HFMA2", 0x031, Sm86Forms.All, Sm86Emit.Hfma2, Rd);
+            Add("HMUL2", 0x032, Sm86Forms.All, Sm86Emit.Hmul2, Rd);
+            Add("HSET2", 0x033, Sm86Forms.All, Sm86Emit.Hset2, Rd);
+            Add("HSETP2", 0x034, Sm86Forms.All, Sm86Emit.Hsetp2);
+            Add("HMNMX2", 0x040, Sm86Forms.All, Sm86Emit.Hmnmx2, Rd);
+
             // 0x110-0x113 are the conversions with a 64-bit operand.
             Add("F2F", 0x104, Sm86Forms.BSlot, Sm86Emit.F2f, Rd);
             Add("F2F.64", 0x110, Sm86Forms.BSlot, Sm86Emit.F2f, Rd);
