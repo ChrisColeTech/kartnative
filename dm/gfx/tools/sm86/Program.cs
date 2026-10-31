@@ -1,11 +1,12 @@
 // SM86 frontend harness (docs/reference/shaders-sm86.md). Commands:
-//   translate <out dir> [--isa sm86|maxwell] [--msl] [--metal] [--jobs N] [--complete <list.txt>] <program.bin>...
+//   translate <out dir> [--isa sm86|maxwell] [--msl] [--metal] [--all] [--jobs N] [--complete <list.txt>] <program.bin>...
 //       Translates each program to <out>/<key>.spv (and with --msl <key>.metal through spirv-cross, with --metal compiles it with xcrun metal).
 //       SM86 graphics programs are the 128-byte NVN2 header + 16-byte instructions, compute programs the instructions only; the stage comes from
 //       <key>.meta.json beside the file (ShaderExtract's dump, $W/shader/sm86) or --stage vs|ps|cs. Maxwell programs are the dmsh_xlate layout (0x50-byte SPH + code).
-//       Task and mesh programs are skipped (the translator has no such stages). A program is complete when the translator met no unsupported
-//       instruction; the summary counts complete programs per stage (and those whose MSL compiled), lists the opcodes that keep the others out
-//       (programs per opcode), and --complete writes the complete programs' paths.
+//       Task and mesh programs are skipped (the translator has no such stages). A program is complete when the translator left no note that makes
+//       the chain drop it (an unsupported instruction, "is not implemented"...); the summary counts complete programs per stage (and those whose MSL
+//       compiled), lists the opcodes and notes that keep the others out (programs each), and --complete writes the complete programs' paths. MSL
+//       and AIR are made for complete programs only, or with --all for every program (to check new emitters in programs other families still block).
 //   fuzz-maxwell <InstTable.cs> <count> <seed> <out.txt>
 //       Generates random Maxwell programs from the instruction table's encodings and writes one digest line per program and target (SPIR-V and GLSL, or the
 //       exception). Run with two translator builds (one with -p:Baseline=true -p:RyuSrc=<old copy>) and compare the files: the Maxwell path must not change.
@@ -89,6 +90,8 @@ static class Harness
 
     public static string Digest(byte[] data) => Convert.ToHexString(SHA256.HashData(data))[..16].ToLowerInvariant();
 
+    static bool compileIncomplete;
+
     static int Translate(string[] args)
     {
         string outDir = args[0];
@@ -108,6 +111,7 @@ static class Harness
                 case "--metal": msl = metal = true; break;
                 case "--jobs": jobs = int.Parse(args[++i]); break;
                 case "--complete": completeList = args[++i]; break;
+                case "--all": compileIncomplete = true; break;
                 default:
                     // Programs are <key>.bin; <key>.c<bank>.bin beside one is its constant segment (a glob over the dump picks those and the meta files up).
                     // A directory stands for every program in it.
@@ -264,8 +268,8 @@ static class Harness
             string result = $"spv {p.BinaryCode.Length} bytes, {acc.Notes.Count} notes";
             Classify(acc, r);
 
-            // Incomplete programs stop at SPIR-V: their MSL says nothing about the frontend.
-            if (msl && r.Missing.Count == 0)
+            // Incomplete programs stop at SPIR-V unless --all asks for them: their MSL says nothing about the frontend's coverage.
+            if (msl && (r.Missing.Count == 0 || compileIncomplete))
             {
                 string mslPath = Path.Combine(outDir, key + ".metal");
                 Run(spirvCross, new[] { "--msl", "--msl-version", "20300", "--msl-argument-buffers", "--msl-texture-buffer-native", "--msl-pad-fragment-output", spv, "--output", mslPath });
@@ -295,6 +299,9 @@ static class Harness
         return r;
     }
 
+    // The notes that make the chain drop a program (dmsh_build.py SM86_BLOCKING): an unsupported instruction counts by opcode, the others by their text.
+    static readonly System.Text.RegularExpressions.Regex BlockingNote = new(@"is not implemented|Failed to find targets for SM86 BRX|jump table not found|: no function at");
+
     static void Classify(Accessor acc, Result r)
     {
         r.Missing.Clear();
@@ -307,6 +314,10 @@ static class Harness
             if (m.Success)
             {
                 r.Missing.Add(m.Groups[1].Value);
+            }
+            else if (BlockingNote.IsMatch(note))
+            {
+                r.Missing.Add("'" + HexNumber.Replace(note, "N") + "'");
             }
             else
             {
