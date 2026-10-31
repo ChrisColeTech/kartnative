@@ -148,8 +148,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
         /// <summary>
         /// IPA d, a[addr] (0x326) and IPA d, a[URa + addr] (0x526, bit 91, the index uniform register in bits 24-29): attribute word address in bits
         /// 64-71, location in 76-77 (default, centroid, offset by Rb), frequency in 78-79 (pass, constant, state). As on Maxwell, a pass read of a
-        /// perspective attribute is the attribute times 1/w (the program multiplies by w itself). The location is not modelled: the translator
-        /// declares inputs without a centroid or offset qualifier, so a centroid read differs only on multisampled edges.
+        /// perspective attribute is the attribute times 1/w (the program multiplies by w itself). A centroid location is a declaration property: the
+        /// decoder marks the input centroid (Sm86Decoder.RecordAttributeUse); an offset location (not in MKW) is read at the pixel centre.
         /// </summary>
         public static void Ipa(EmitterContext context)
         {
