@@ -25,9 +25,11 @@ modules	main subsdk0 sdk
 romfs_marker	System/Resource/ResourceSizeTable.Product.100.Nin_Ounce_NVN2.rsizetable.zs
 
 # ---- Memory ----
-# provisional (profile_guess.py): the NPDM declares 64 MB of system resource (virtual address memory) and main sets a heap. Switch 2 values (12 GB layout, a ~9.5 GiB heap) are the bring-up's to set
-mem_reserve	0x140000000
+# The Switch 2's 12 GB layout gives an application a pool of 9809 MiB (app_pool 0x265100000), which GetInfo TotalMemorySize reports. MKW's nninitStartup (main+0xc387b4) sets a heap
+# of (total - used) rounded down to 2 MB, less 0x60400000 (1540 MB kept for its other allocators): 0x200d00000, just over 8 GiB, with the 64 MB of used memory the host reports. The heap
+# region (mem_reserve - 256 MB - alias - stack) is 8.25 GiB to hold it; only the pages the game touches take memory. The NPDM declares 64 MB of system resource (virtual address memory)
+mem_reserve	0x348000000
 mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0xCD500000
+app_pool	0x265100000
 sys_resource	0x4000000
