@@ -127,6 +127,14 @@ To enroll a cut for any game's own module:
 - **Fix:** `jump_adr_offsets`, tried only where the table-relative form is not found. The bounds check can be on a register copied into the index (`mov w16, w15`), and the table base can be built far from the dispatch; then every `adrp` + `add` pair in the function that builds that register is tried, and a table is accepted only if exactly one makes every target an instruction of the function.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) `main+0x393bb0` and others.
 
+### A vector register taken for the jump table index
+
+- **Symptom:** `AssertionError: jump table ea4a8` in `patch_nso.py` while rewriting Mario Kart World 1.0.0's `main`.
+- **Cause:** the adr-relative form with an FP load between the bounds check and the table load: `ldrb w1, [x18, #5]; cmp w1, #5; b.hi; ldr s1, [x18, #0xc]; adr x18, #L; ldrsw x2, [x17, x1, lsl #2]; add x18, x18, x2; fmov s0, w8; br x18`. The walk back from the load to the check turned every written register name into `w` + its number, so capstone's `s1` read as `w1`: the index seemed to change after the check and the table was refused. `half_count` had the same test.
+- **Fix:** `gpr_w` names only general registers (`x` / `w`), so `b` / `h` / `s` / `d` / `q` registers never stand for an index.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) `main+0xea4a8` (its other adr-relative table, `main+0x9af90`, and the 16 table-relative ones rewrote before).
+- **Check:** Mario Kart 8 Deluxe (v1376256) and Super Mario Odyssey (v0, v262144) rewrite byte-identically.
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).
@@ -291,6 +299,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), 1,432 registered NROs.
 - **Check:** `test_nro_header.py` runs the real rewriter on synthetic NROs whose build IDs decode as an `x18` load or `br x18`, checks the header byte-for-byte, and checks that an actual `x18` instruction immediately after it is rewritten. Code before the first unwind entry is covered too: per-function analysis must not reenter the header even when the linear scans exclude it.
 
+### Switch 2 code: the instructions capstone 5 leaves undecoded
+
+- **Symptom:** none so far: a check for any Switch 2 module, since `x18_words` and `disasm_fn` go on past words capstone cannot decode, and a real instruction there that names `x18`, a system register or an exclusive would be missed.
+- **Cause:** Switch 2 code is built for Armv8.5 with PAC (`pacibsp` / `retab` / `autibsp`, `pacib`, `xpaci`), LSE atomics and `cas` / `casp`, `ldapr`, and the odd MTE `stg`.
+- **Check:** sweep the module with `llvm-objdump -d --mattr=+v8.5a,+mte,+pauth,+lse,+rcpc` (on an `nso2elf.py` ELF) and compare its `x18` instructions with the rewriter's `sites.tsv`; decode capstone's undecodable words with `llvm-mc --disassemble` with the same features. On Mario Kart World 1.0.0 capstone 5 decodes every instruction llvm does: `main`'s 127 undecodable words are 125 A32 `udf` trap words `0xe7ffdefe` after returns and noreturn calls (as Monster Hunter Rise's, above) and the two words of the image header at `+0x4` / `+0x8`, which llvm rejects as well; `sdk` and `subsdk0` have only the two header words. The `x18` sets agree exactly (main 29,446, sdk 15,411, subsdk0 510, each the rewriter's sites plus its `br x18` tables).
+- **Note:** none of the three modules has a pointer-authenticated branch or load naming `x18` (`braa` / `blraa` / `ldraa`; their PAC is `retab` 88,410 / 20,839 / 5,504 times, `pacibsp`, `autibsp`, `pacib`, `xpaci`, `xpaclri`); `site_plain` would leave such a branch's borrowed scratch registers behind, so the rewriter stops at one (`RuntimeError: <addr> braa x18, …`) as it does at `ret` / `b` / `bl` with `x18`. PAC, LSE, `ldapr`, `casp` and MTE run natively on the M5 Pro this was checked on. The one `stg` (`sdk+0x74c160`) is libunwind retagging the stack while it unwinds, behind a flag; Apple chips without MTE would trap on it.
+
 ## Stack and system registers
 
 ### Stack pointer writes through x18
@@ -314,6 +329,7 @@ To enroll a cut for any game's own module:
 - **Symptom:** SIGILL / trap on a system register read.
 - **Cause:** a newer SDK reads a register macOS traps (`CTR_EL0` in SDK 16's `FlushDataCache`).
 - **Fix:** rewrite to a constant (`patch_nso.py`, the `ctr` site kind).
+- **Note:** Mario Kart World 1.0.0 (Switch 2) reads or writes only `TPIDR_EL0`, `TPIDRRO_EL0`, `CNTPCT_EL0` (40 reads in `sdk`, a host gate whose tick rate is the host's to choose), `CTR_EL0` (5 in `sdk`), `FPCR`, `FPSR` and `NZCV` (llvm-objdump sweep of `main`, `sdk` and `subsdk0`): no `CNTFRQ_EL0`, `CNTVCT_EL0`, `CNTPCTSS_EL0` / `CNTVCTSS_EL0` or ID register, which the rewriter would leave to run natively. Its cache maintenance is `dc civac` / `dc cvac` / `ic ivau`, as in Switch 1 SDKs.
 
 ## Relocations and module layout
 
