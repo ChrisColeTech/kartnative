@@ -93,6 +93,7 @@ namespace Ryujinx.Graphics.Shader.Sm86
         {
             AddAlu();
             AddMem();
+            AddTex();
             AddFlow();
         }
 
