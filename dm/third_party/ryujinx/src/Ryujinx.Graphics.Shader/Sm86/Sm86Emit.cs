@@ -147,11 +147,11 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
         /// <summary>
         /// The constant-buffer operand of forms 3 and 5: byte offset in bits 38-53, bank in 54-58; with bit 91 set the bank is the uniform register in
-        /// bits 32-37 (c[URx][offset]).
+        /// bits 32-37 (c[URx][offset]). <paramref name="extraBytes"/> reads a later word of the operand (the high word of a 64-bit pair).
         /// </summary>
-        public static Operand SrcCbuf(EmitterContext context, Sm86Inst inst)
+        public static Operand SrcCbuf(EmitterContext context, Sm86Inst inst, int extraBytes = 0)
         {
-            int offset = inst.CbufOffset;
+            int offset = inst.CbufOffset + extraBytes;
 
             if (inst.Bit(91) && !IsUniform(inst))
             {
