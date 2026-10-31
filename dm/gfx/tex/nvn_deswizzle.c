@@ -51,11 +51,12 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
     return 0;
 }
 
-static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint8_t *lin, size_t pitch, int to_linear) {
+// from: the storage offset bl points at (0 for a whole texture's storage, else nvn_deswizzle_part's piece)
+static int move_from(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint64_t from, uint8_t *lin, size_t pitch, int to_linear) {
     uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
-    if (pitch < row_bytes) return -1;
-    bl += base; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
+    if (pitch < row_bytes || base < from) return -1;
+    bl += base - from; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
     if (lb < row_bytes) lb = row_bytes;
     // Hoist nvn_bl_offset's slice and row terms out of the segment loop. The block height and depth are powers of two,
     // so their division / remainder become shifts and masks. At x = 16*j the block column is j >> 2, and the segment
@@ -110,10 +111,18 @@ static void upload_dump(const nvn_texdesc *d, const uint8_t *lin, size_t pitch) 
 }
 
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, void *dst, size_t dst_pitch) {
-    int r = move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1);
+    int r = move_from(d, level, layer, (uint8_t *)src, 0, (uint8_t *)dst, dst_pitch, 1);
     if (!r && !level && !layer) upload_dump(d, dst, dst_pitch);
     return r;
 }
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, size_t src_pitch, void *dst) {
-    return move(d, level, layer, (uint8_t *)dst, (uint8_t *)src, src_pitch, 0);
+    return move_from(d, level, layer, (uint8_t *)dst, 0, (uint8_t *)src, src_pitch, 0);
+}
+int nvn_deswizzle_part(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_off, uint64_t src_len, void *dst, size_t dst_pitch) {
+    uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td;
+    if (nvn_deswizzle_geom(d, level, layer, &rb, &rows, &slices, &base, &th, &td, &bpb)) return -1;
+    nvn_texlayout L; nvn_tex_layout(d, &L);
+    uint64_t lvl = nvn_tex_level_offset(d, level), end = level + 1 < (d->levels ? d->levels : 1) ? nvn_tex_level_offset(d, level + 1) : L.layer_size;
+    if (base < src_off || base + (end - lvl) > src_off + src_len) return -1;   // the level's whole extent in this layer must be in the piece
+    return move_from(d, level, layer, (uint8_t *)src, src_off, (uint8_t *)dst, dst_pitch, 1);
 }

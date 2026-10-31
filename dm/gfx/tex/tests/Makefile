@@ -8,8 +8,10 @@ $(O)t_tex: t_tex.c ../nvn_deswizzle.c ../nvn_deswizzle.h ../../nvn/nvn_tex.c ../
 	$(CLANG) $(CFLAGS) -o $@ t_tex.c ../nvn_deswizzle.c ../../nvn/nvn_tex.c -lm
 $(O)t_fmt_mtl: t_fmt_mtl.m ../nvn_fmt_mtl.c ../nvn_fmt_mtl.h
 	$(CLANG) $(CFLAGS) -fobjc-arc -o $@ t_fmt_mtl.m ../nvn_fmt_mtl.c -framework Metal -framework Foundation
-run: t_tex t_fmt_mtl
-	./t_fmt_mtl && ./t_tex
+$(O)t_sparse_tex: t_sparse_tex.m ../nvn_sparse_tex.m ../nvn_sparse_tex.h ../nvn_deswizzle.c ../nvn_deswizzle.h ../../nvn/nvn_tex.c ../../nvn/nvn_tex.h
+	$(CLANG) $(CFLAGS) -Wno-missing-field-initializers -fobjc-arc -o $@ t_sparse_tex.m ../nvn_sparse_tex.m ../nvn_deswizzle.c ../../nvn/nvn_tex.c -framework Metal -framework Foundation
+run: t_tex t_fmt_mtl t_sparse_tex
+	./t_fmt_mtl && ./t_tex && ./t_sparse_tex
 .PHONY: run
 # ASan and UBSan (../../../sanitizers/sanitizers.mk): the CPU test t_tex, built into asan/ (t_fmt_mtl creates Metal textures and stays local)
 include ../../../sanitizers/sanitizers.mk
