@@ -491,6 +491,60 @@ def scan_nsps(nsp_dir, from_package=None):
     return app, fam
 
 
+# ---- A loose dump: the game's ExeFS and RomFS as folders (exefs/ with main and main.npdm, romfs/; Mario Kart World's dump) instead of packages ----
+def loose_dump(d):
+    """The dump in folder d when it holds an ExeFS folder (exefs/ with main and main.npdm, any case) and a RomFS folder beside it: (exefs, romfs, its control.nacp or None: a dump of
+    the ExeFS and RomFS alone has no control data); None for a folder of packages. Nothing is extracted from it: the build links the folders where an extraction would be (link_loose),
+    and needs no prod.keys"""
+    sub = {p.name.lower(): p for p in d.iterdir() if p.is_dir()}
+    exefs, romfs = sub.get('exefs'), sub.get('romfs')
+    if exefs is None or not (exefs / 'main').is_file() or not (exefs / 'main.npdm').is_file(): return None
+    if romfs is None: raise BuildError(f'{d} has an ExeFS folder ({exefs.name}/) but no romfs/ beside it: a loose dump needs both')
+    pkgs = [p.name for p in d.iterdir() if p.suffix in ('.nsp', '.nsz', '.xci', '.xcz') and not p.name.startswith('._')]
+    if pkgs: say(f'{d} holds a loose dump (exefs/, romfs/): building from it, not from {", ".join(pkgs)}')
+    nacp = next((p for p in (d / 'control.nacp', d / 'control' / 'control.nacp') if p.is_file()), None)
+    return types.SimpleNamespace(exefs=exefs, romfs=romfs, nacp=nacp)
+
+
+def loose_title(loose):   # the dump's title ID: the program ID in main.npdm's ACI0 (a loose dump has no ticket or content meta)
+    tid = pg.npdm(loose.exefs / 'main.npdm')[1]
+    if not tid: raise BuildError(f'{loose.exefs / "main.npdm"} names no program ID (no ACI0 header)')
+    return tid
+
+
+def loose_version(loose, g, want):
+    """The version a loose dump holds, which nothing in it names: the one asked for (-p / PACKAGE), else the profile's build row whose every module has the dump's build ID, else v0"""
+    if want: return want
+    for ver, b in (g.builds() if g else {}).items():
+        mods = {m: bid for m, bid in b.items() if m != 'display'}
+        if mods and all((loose.exefs / m).is_file() and build_id(loose.exefs / m) == bid for m, bid in mods.items()): return ver
+    return 'v0'
+
+
+def loose_same_build(loose):   # same_build for a loose dump: its main's build ID against every profile's build rows → (profile, version, main build ID) or None
+    import game as gamemod   # dm/games (main put it on the path)
+    bid = build_id(loose.exefs / 'main'); g = gamemod.by_build(bid)
+    return (g, next(ver for ver, b in g.builds().items() if b.get('main') == bid), bid) if g else None
+
+
+def link_loose(ex, ver, loose):
+    """<build folder>/extract/<version> as an extraction holds it, made of symbolic links to the dump: ExeFS, RomFS and (when the dump has one) control.nacp; nothing is copied"""
+    PROG.stage(f'game files {ver}')
+    dst = ex / ver
+    dst.mkdir(parents=True, exist_ok=True)
+    if (dst / 'RomFS.img').exists(): raise BuildError(f'{dst} holds an extraction (RomFS.img): delete {dst} to build from the loose dump at {loose.exefs.parent}')
+    for name, src in (('ExeFS', loose.exefs), ('RomFS', loose.romfs), ('control.nacp', loose.nacp)):
+        p = dst / name
+        if p.is_symlink():
+            if src is not None and p.readlink() == src: continue
+            p.unlink()
+        elif p.exists(): raise BuildError(f'{p} is from an extraction: delete {dst} to build from the loose dump at {loose.exefs.parent}')
+        if src is not None: p.symlink_to(src, target_is_directory=src.is_dir())
+    PROG.end(f'linked to the loose dump {loose.exefs.parent}')
+    return dst
+
+
+
 NSZ_MAIN = "import sys; sys.argv[0] = 'nsz'; from nsz import main; main()"   # the nsz tool of the Python running this file (Spyder does not have its bin folder on PATH)
 
 
@@ -634,28 +688,38 @@ def check_versions_aarch64(dirs, logs, g, name):   # every extracted version of 
                       f'; game profile {g.id} registers {", ".join(other)}: pack {"that version" if len(other) == 1 else "one of those versions"} (-p / PACKAGE) with its update in the folder' if other else '')
 
 
-def survey(nsp_dir, app, fam, keys, repo, py, env):
+def survey(nsp_dir, app, fam, keys, repo, py, env, loose=None, version='v0'):
+    """The survey report <folder>/<title ID>_survey/survey.md and the facts write_profile takes. From packages: the code modules and a RomFS manifest extracted with nx_extract (no game
+    files written). From a loose dump (loose_dump): its own ExeFS and RomFS folders, read where they are; version names it (loose_version)"""
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'no game profile for {app:016X}: surveying first')
-    PROG.plan(4)   # nx_extract, the manifest, the code modules (reading them, then the rewrite-site census), the imports
-    PROG.stage('survey: build nx_extract')
-    nx = build_nx_extract(repo, work, logs, env)
-    ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
-    upd = ups[-1][1] if ups else None
-    tmp = work / 'extract.partial'; rmtree(tmp)
-    def listed():   # files in the manifest so far
-        try: return {'done': (tmp / 'romfs_manifest.tsv').read_bytes().count(b'\n'), 'unit': 'files'}
-        except OSError: return None
-    PROG.stage('survey: RomFS manifest', poll=listed)
-    say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
-    run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
-    swap_in(tmp, ex)
+    if loose:
+        PROG.plan(2)   # the code modules (reading them, then the rewrite-site census), the imports
+        exefs, rom_src, ctl, nro_dir, dv, upd, ups = loose.exefs, loose.romfs, loose.nacp, loose.romfs, None, None, []
+        say(f'reading the loose dump in place (nothing extracted): {loose.exefs}, {loose.romfs}')
+    else:
+        PROG.plan(4)   # nx_extract, the manifest, the code modules (reading them, then the rewrite-site census), the imports
+        PROG.stage('survey: build nx_extract')
+        nx = build_nx_extract(repo, work, logs, env)
+        ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
+        upd = ups[-1][1] if ups else None
+        tmp = work / 'extract.partial'; rmtree(tmp)
+        def listed():   # files in the manifest so far
+            try: return {'done': (tmp / 'romfs_manifest.tsv').read_bytes().count(b'\n'), 'unit': 'files'}
+            except OSError: return None
+        PROG.stage('survey: RomFS manifest', poll=listed)
+        say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
+        run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
+        swap_in(tmp, ex)
+        exefs, rom_src, ctl, nro_dir = ex / 'ExeFS', ex / 'romfs_manifest.tsv', ex / 'control.nacp', ex / 'romfs_nro'
+        dv = re.search(r'display version (\S+)', (logs / 'extract.log').read_text(errors='replace'))
     PROG.stage('survey: code modules', step='reading')
-    xlog = (logs / 'extract.log').read_text(errors='replace')
-    dv = re.search(r'display version (\S+)', xlog)
-    check_aarch64(ex / 'ExeFS', f'{nacp.name(ex / "control.nacp") or "?"} ({app:016X})')
-    F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv'); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
-    R = [f'# Survey: {nacp.name(ex / "control.nacp") or "?"} ({app:016X})', '', f'- display version: {dv.group(1) if dv else "?"}', f'- base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)']
+    title = nacp.name(ctl) if ctl else ''
+    check_aarch64(exefs, f'{title or "?"} ({app:016X})')
+    F = pg.facts_of(exefs, rom_src); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
+    R = [f'# Survey: {title or "?"} ({app:016X})', '', f'- display version: {dv.group(1) if dv else nacp.version(ctl) if ctl else "?"}']
+    if loose: R.append(f'- loose dump: `{loose.exefs}` and `{loose.romfs}`' + ('' if ctl else ' (no control data: no game name, display version or languages)'))
+    else: R.append(f'- base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)')
     R += [f'- update: `{p.name}` (v{v}, {p.stat().st_size / 2**30:.2f} GB){" (used for this survey)" if p == upd else ""}' for v, p in ups]
     R += [f'- DLC: `{p.name}` ({p.stat().st_size / 1024:.0f} KB{", licence only, no content" if p.stat().st_size < 1 << 20 else ""})' for _, _, p in fam['dlc']]
 
@@ -663,7 +727,8 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     R += ['', '## Code modules', '', '| module | what | build ID | text / ro / data (MB) | bss (MB) |', '|---|---|---|---|---|']
     R += [f'| {n} | {m["kind"]} | `{m["bid"]}` | ' + ' / '.join(f'{z / 2**20:.1f}' for z in m['sizes']) + f' | {m["bss"] / 2**20:.1f} |' for n, m in mods.items()]
     if F['program'] is not None: R.append(f'\n- main.npdm program ID: `{F["program"]:016X}`')
-    if (ex / 'ExeFS/main.npdm').exists(): R.append(f'- system resource: {F["sysres"] / 2**20:.0f} MB')
+    if (exefs / 'main.npdm').exists(): R.append(f'- system resource: {F["sysres"] / 2**20:.0f} MB')
+    R.append('- Switch 2 program: ' + ('yes, main.npdm\'s ACID has the 0x300-byte signature area of a Switch 2 program (Switch 1: 0x200): profile key switch2 on' if F.get('switch2') else 'no'))
     R.append(f'- SDK: {", ".join(sorted(F["sdkver"])) or "?"} (Mario: 16_2_0 / 16_2_12)')
     R.append('- SDK components: ' + (', '.join(sorted(F['comps'])) or '—'))
     if F['unity']: R.append('- Unity: ' + ', '.join(sorted(F['unity'])))
@@ -678,29 +743,31 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
 
     # Rewrite-site census and SDK surface
     R += ['', '## Rewrite-site census (insn_census.py)', '', '```']
-    census = [ex / 'ExeFS' / n for n in mods if n != 'rtld']   # rtld is replaced by the host
+    census = [exefs / n for n in mods if n != 'rtld']   # rtld is replaced by the host
     for i, m in enumerate(census):
         PROG.set(step=f'rewrite sites in {m.name}', done=i, total=len(census), unit='modules')
         run([py, repo / 'dm/tools/insn_census.py', m], logs / f'census_{m.name}.log', env=env)
         R += (logs / f'census_{m.name}.log').read_text(errors='replace').rstrip().splitlines()
     R += ['```', '', '## Imports vs host hooks (nso_syms.py)', '', '```']
     PROG.stage('survey: imports vs host hooks')
-    run([py, repo / 'dm/tools/nso_syms.py', repo / 'dm/host', '-', ex / 'ExeFS'], logs / 'nso_syms.log', env=env)
+    run([py, repo / 'dm/tools/nso_syms.py', repo / 'dm/host', '-', exefs], logs / 'nso_syms.log', env=env)
     PROG.end()
     R += (logs / 'nso_syms.log').read_text(errors='replace').rstrip().splitlines() + ['```']
 
     # What it means for a port
     G = pg.guess(F)   # the provisional profile's keys (write_profile writes the same)
     keep = G['modules'][0].split()   # how the build will get the shaders (decided again from the extraction at build time; the survey has only a RomFS manifest, so Unreal paks are guessed from main's markers)
-    nros = {p.name: p for p in sorted((ex / 'romfs_nro').rglob('*.nro'))}   # the manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN)
-    nro_add = pg.nro_modules(ex / 'ExeFS', nros, keep) if nros else {}
+    # the manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN); a loose dump has them in its RomFS
+    nros = {p.name: p for p in sorted(nro_dir.rglob('*.nro'))}
+    nro_add = pg.nro_modules(exefs, nros, keep) if nros else {}
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
                           rom['exts'].get('.pak', 0) if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
-                          nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
+                          nro_imports=frozenset(pg.romfs_nro_imports(nro_dir)))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
     notes = []
     if not vulkan and not gl and 'nvnBootstrapLoader' not in mods['main']['imports']: notes.append('main imports neither nvnBootstrapLoader nor Vulkan functions nor OpenGL through EGL: the host implements only NVN, Vulkan and OpenGL')
+    if F.get('switch2'): notes.append('a Switch 2 program: NVN2 and SM86 shaders, Switch 2 SVCs and services; the profile\'s switch2 key selects the host\'s Switch 2 behaviour, and the shader chain does not translate SM86 yet (the build splits the shaders but does not translate them)')
     if vulkan: notes.append(f'{S["graphics"][1]}; the NVN shader steps are skipped' + (', and its shaders are captured by booting it on the Mac (no SPIR-V file in the RomFS)' if S['vk_capture'][0] else ''))
     if gl: notes.append(f'{S["graphics"][1]}; the NVN shader steps are skipped: gl_shaders.py translates its GLSL sources (MVGL archives, main\'s strings'
                         + (', and the shaders it puts together at run time, captured by booting it on the Mac)' if S['gl_capture'][0] else ')'))
@@ -733,11 +800,12 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     R += ['', '## Provisional profile keys (dm/games/profile_guess.py)', '', 'What the game files decide; mem_used follows the rewrite, and a game with virtual address memory that sets a heap gets a heap check on the Mac (scripts/build_ipa_from_nsp.py heap_check).', '', '```']
     R += [f'{k}\t{v}' + (f'\t# {why}' if why else '') for k, (v, why) in G.items()] + ['```']
     R += ['', 'Next steps: docs/agents (02 survey, 03 bring-up, symptoms.md for each failure).']
-    (work / 'survey.md').write_text('\n'.join(R) + '\n')
+    work.mkdir(parents=True, exist_ok=True); (work / 'survey.md').write_text('\n'.join(R) + '\n')
     for n in notes: say(n)
     say(f'survey report: {work / "survey.md"}')
+    if loose: return {'F': F, 'name': title, 'display': (nacp.version(ctl) if ctl else '') or '?', 'version': version}
     upv = ups[-1][0] if ups else None
-    return {'F': F, 'name': nacp.name(ex / 'control.nacp') or '', 'display': dv.group(1) if dv else '?', 'version': 'v0' if upd is None else f'v{upv or 1}'}
+    return {'F': F, 'name': title, 'display': dv.group(1) if dv else '?', 'version': 'v0' if upd is None else f'v{upv or 1}'}
 
 
 # ---- Provisional profile (a game with no profile in dm/games) ----
@@ -803,7 +871,7 @@ def write_profile(pdir, app, f):
     L = ['# Provisional game profile (generated by scripts/build_ipa_from_nsp.py from the survey with dm/games/profile_guess.py, not checked by hand)',
          f'# {name}, SDK {F["sdk"] or "?"}, survey {f["survey"]}', '',
          '# ---- Identity ----', f'title_id{T}{app:016X}', f'program_id{T}{(F["program"] or app):016X}', '',
-         '# ---- App ----', f'name{T}{name}', f'ipa{T}{ipa_name(name, app)}', f'app_category{T}public.app-category.games', *key('pad_layout'), *key('op_mode'), '',
+         '# ---- App ----', f'name{T}{name}', f'ipa{T}{ipa_name(name, app)}', f'app_category{T}public.app-category.games', *key('pad_layout'), *key('op_mode'), *key('switch2'), '',
          '# ---- Versions ----', T.join(['build', f['version'], f['display']] + [f'{m}={F["mods"][m]["bid"]}' for m in mods]), f'package{T}{f["version"]}', f'shader_versions{T}{f["version"]}', '',
          '# ---- Files ----', *key('modules'), f'romfs_marker{T}{R["biggest"][1]}', f'zip_store{T}{":".join(store + [".metallib"])}', '',
          '# ---- Memory ----', *key('mem_reserve'), *key('mem_alias'), *key('mem_stack'), *key('app_pool'), *key('sys_resource'), '',
@@ -2264,9 +2332,10 @@ def main(args=None):
     if romfs_mode == 'separate' and mac: raise BuildError(f'--romfs separate keeps the game files off the iPhone app: it cannot be combined with --platform {platform}, which runs from the extracted files')
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
-    keys = Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if not nsp_dir.is_dir(): raise BuildError(f'not a folder: {nsp_dir}')
-    if not keys.is_file(): raise BuildError(f'no such file: {keys}')
+    loose = loose_dump(nsp_dir)   # a loose dump (exefs/ and romfs/ folders) instead of packages: nothing to extract, so no keys
+    keys = None if loose else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
+    if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
     global pg; import profile_guess as pg   # dm/games: a provisional profile's keys from the game files and from the heap check
     sys.path.insert(0, str(repo / 'dm/tools')); global nacp; import nacp   # the game name in the NSP's control data
@@ -2278,11 +2347,15 @@ def main(args=None):
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
-    with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)
-    fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
+    if loose:
+        app, fam = loose_title(loose), {'base': None, 'updates': [], 'dlc': []}
+        say(f'loose dump of {app:016X} (main.npdm\'s program ID): {loose.exefs}, {loose.romfs}')
+    else:
+        with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)
+        fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False
-    alias = None if force or g else same_build(nsp_dir, app, fam, keys, repo, env)   # a known build under another title ID: packed from a profile derived from that build's
+    alias = None if force or g else loose_same_build(loose) if loose else same_build(nsp_dir, app, fam, keys, repo, env)   # a known build under another title ID: packed from a profile derived from that build's
     if alias:
         g = alias[0]; say(f'no game profile for {app:016X}, but its main build {alias[2]} is game profile {g.id}\'s {alias[1]} ({g.get("name", "")}) under another title ID')
     if g is None:   # no game profile: survey, then (unless --survey-only) a provisional profile outside the repository and a best-effort IPA
@@ -2295,7 +2368,7 @@ def main(args=None):
         if (pdir / f'{app:016X}' / 'game.tsv').exists() and not (args.survey_only or SURVEY_ONLY):
             say(f'no game profile for {app:016X}: reusing the provisional profile from the last run (delete it to survey again)')
         else:
-            facts = survey(nsp_dir, app, fam, keys, repo, py, env)
+            facts = survey(nsp_dir, app, fam, keys, repo, py, env, loose, loose_version(loose, None, args.package or PACKAGE) if loose else 'v0')
             if args.survey_only or SURVEY_ONLY: return
             facts['survey'] = str(nsp_dir / f'{app:016X}_survey' / 'survey.md')
             write_profile(pdir / f'{app:016X}', app, facts)
@@ -2307,7 +2380,7 @@ def main(args=None):
         say('[RED] provisional game profile: values guessed from the survey, the game may not boot; bring it up per docs/agents after packing')
     say(f'game profile: {g.id}{" (provisional: " + str(g.dir) + ")" if provisional else ""}')
     builds, need = g.builds(), g.words('shader_versions')
-    have, derived = nsp_versions(fam, builds), False
+    have, derived = {loose_version(loose, g, args.package or PACKAGE): None} if loose else nsp_versions(fam, builds), False   # a loose dump holds one version
     if provisional:   # the version the survey saw
         pkg_ver = args.package or PACKAGE or g.get('package')
         if pkg_ver not in builds: raise BuildError(f"the version to pack (-p / PACKAGE) must be one the game profile registers: {', '.join(builds)}")
@@ -2346,18 +2419,22 @@ def main(args=None):
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
-    picks = pick_nsps(fam, have, versions)
+    picks = {} if loose else pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = extract_bytes(picks, False) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = 6 if loose else extract_bytes(picks, False) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack (a loose dump: nothing extracted)
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
-    PROG.plan(1 + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
-    PROG.stage('build nx_extract')
-    nx = build_nx_extract(repo, work, logs, env)
-    PROG.end()
+    # nx_extract (none for a loose dump), each version's game files, the DLC, then 4 stages; prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
+    PROG.plan(1 - bool(loose) + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))
+    nx = None
+    if not loose:
+        PROG.stage('build nx_extract')
+        nx = build_nx_extract(repo, work, logs, env)
+        PROG.end()
     dirs = {}
-    for ver in versions:   # each merged version streams directly into its own image
+    for ver in versions:   # each merged version streams directly into its own image; a loose dump's one version is linked where its extraction would be
+        if loose: dirs[ver] = link_loose(ex, ver, loose); continue
         b, u = picks[ver]
         dirs[ver] = extract(nx, keys, ex, ver, b, u, None, logs, g)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
@@ -2392,9 +2469,10 @@ def main(args=None):
     PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))
     aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
-    base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
-    # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
-    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp')
+    base = dirs[versions[0]] if loose else next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
+    # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them.
+    # A loose dump without control data takes the profile's name
+    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name', '') if loose else '')
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
     bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'

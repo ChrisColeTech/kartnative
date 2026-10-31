@@ -30,6 +30,8 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 
 **A damaged NSP** (an incomplete copy, a broken download) shows as a hash error while the RomFS is read. `nx_extract` lists every file whose data fails the NCA's hash check and exits with code 3; `--allow-damaged` (the NSP script's `ALLOW_DAMAGED` / `--allow-damaged`) writes them as read and only lists them. To check a whole NCA, its file name is the first 16 bytes of its SHA-256: Super Mario Galaxy's base program NCA hashed differently, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies), while its update and the small NCAs matched their names.
 
+**A loose dump** (the game's ExeFS and RomFS as folders: `<game>/exefs/` with `main`, `main.npdm`, `sdk`, `subsdk*`, and `<game>/romfs/`, any case; Mario Kart World's dump) needs no extraction and no keys. Give the folder to the NSP script as the NSP folder: it reads the title ID from `main.npdm` (ACI0's program ID), the version from the profile's build row whose build IDs the modules have (else `v0`, or `-p`), surveys the folders where they are (`<game>/<title ID>_survey/survey.md`, with the Switch 2 fact from `main.npdm`'s ACID), and links them as `<id>_build/extract/<version>/ExeFS` and `RomFS` (and `control.nacp` when the dump has one beside `exefs/`), so every later step reads the dump itself ([The packing script in detail](../development.md#the-packing-script-in-detail)). A dump without control data has no game name, display version or languages: the app takes the profile's `name`.
+
 ## Workspace layout used so far
 
 The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<title>_build/`, never in the home folder:
