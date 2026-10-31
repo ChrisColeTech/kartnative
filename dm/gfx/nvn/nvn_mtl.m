@@ -2725,7 +2725,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         pk = [NvPkg new];
         pk->sparse = t->pool && nvn_sparse_pool(t->pool); pk->vgen = pk->vseen = nvn_sparse_gen();
         MTLTextureDescriptor *md;
-        if (DM_GAME_SWITCH2 && pk->sparse && (md = tex_desc(t, 1)) && nvn_stex_wanted(g_dev, &t->d, md.pixelFormat, STEX_MIN_BYTES) && (pk->stex = nvn_stex_new(g_dev, md, &t->d))) {   // Switch 2 only for now: Switch 1 games keep their tested path
+        if (DM_GAME_SWITCH2 && pk->sparse && (md = tex_desc(t, 1)) && nvn_stex_wanted(g_dev, &t->d, md.pixelFormat, STEX_MIN_BYTES)) {   // Switch 2 only for now: Switch 1 games keep their tested path
+            // made with the usage tex_upgrade would add, as it cannot replace this texture: MKW renders into its 6144x6144x2 RGBA8 sparse array through an sRGB view (ser 31488)
+            md.usage |= MTLTextureUsagePixelFormatView | (fmt_compressed(t->d.format) ? 0 : MTLTextureUsageRenderTarget);
+            pk->stex = nvn_stex_new(g_dev, md, &t->d);
+        }
+        if (pk->stex) {
             pk->tex = nvn_stex_texture(pk->stex); res_add(pk->tex);
             stex_sync(pk, t, 1);
         } else pk->tex = pkg_upload(t, &pk->stamp, nil, 0);
