@@ -25,6 +25,12 @@ $W/run/boot.sh <log name> [seconds] [VAR=value ...]
 
 Useful switches: `DM_FS=1` (file opens, and not-found probes), `DM_SVC=1` (memory SVCs and other syscalls), `DM_THR=1` (thread SVCs), `DM_WATCH=<s>` (dump all threads after s seconds), `DM_WATCH_STALL=<s>` (dump when the frame loop stops progressing).
 
+## Switch 2 programs
+
+A profile with `switch2 on` (written from `main.npdm`) builds a host that answers as the Switch 2 kernel and SDK where they differ: the 31.25 MHz system counter, cores 0-5, `GetInfo` 29-33 and svc 0x80; its SDK (19.3.3 on [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)) also has calls of its own (`oe` graphics scale, audio device modes), found as the Switch 1 ones are. Set the profile's memory from the Switch 2's 12 GB layout (`app_pool` 9809 MiB) and the heap the game's `nninitStartup` asks for ([The Switch 2's 12 GB layout](../reference/memory.md#the-switch-2s-12-gb-layout)).
+
+The graphics API is NVN2: the game checks the device's API version (231.16 on Mario Kart World) and quietly skips its graphics setup when it does not match, so the first symptom is a later null read. To see the non-graphics calls past that point before NVN2 exists, `DM_NVN_API=<major>.<minor>` makes the NVN1 implementations report the version the game wants; the graphics calls that follow run through implementations of another ABI, so treat that run as a list of the calls the game makes and of the service blockers behind them, not as graphics behaviour.
+
 ## Failure catalogue
 
 The failures met so far are filed by subsystem, one entry per mechanism (symptom, cause, fix, the games it was found on): [rewriter](../reference/rewriter.md), [memory and address space](../reference/memory.md), [threads](../reference/threads.md), [services and SDK calls](../reference/services.md), [movies](../reference/movies.md), [audio](../reference/audio.md), [frame rate](../reference/frame-rate.md), [NVN objects](../reference/nvn-objects.md) and [game state](../reference/game-state.md); graphics in [rendering](../reference/rendering.md) and [shaders](../reference/shaders.md). Most new-title failures are one of them in a new form, so search the [symptom index](symptoms.md) for the assertion, `[RED]` text, abort site or visible result first, then read the entry and the game notes it names.
