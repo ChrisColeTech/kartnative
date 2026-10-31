@@ -944,6 +944,20 @@ What the host does with the command-buffer entries NVN2 adds or changes (`dm/gfx
 - **Fix:** both are accepted and dropped, as are the engine-forced debug group / marker forms (`…Graphics`, `…Compute`).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (`SetStencilCullCriteria(3, 0xff, 0xff)` at main+0x16d73f8; 3 `SetComputeOverlapMode` sites).
 
+### Large sparse textures uploaded tile by tile
+
+- **Symptom:** after about 200 frames, `[RED] upload command buffer execution error … Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)`, then `[RED] command buffer execution error`, and the game stops in a `SyncWait`; the memory line reports tens of GB of GPU allocations.
+- **Cause:** a packaged texture of a sparse virtual pool was uploaded whole (`pkg_upload_`): a Metal texture, a staging buffer and a gathered copy, each its full size, on every upload and re-upload. MKW's sparse arrays are 8192×8192×68 ASTC 8×8 and BC6H (1.45 and 5.8 GB of address space, mostly unmapped).
+- **Fix:** in Switch 2 builds a sparse texture of at least 32 MB whose Metal 64 KB tile matches the guest's is a placement-sparse texture ([nvn-objects.md](nvn-objects.md#sparse-textures-backed-by-metal-placement-sparse-textures)): `stex_sync` (`nvn_mtl.m`) maps tiles where the guest maps memory and uploads only the tiles whose pages changed, at most 256 MB a sync (the rest on the next use), in place. Such a texture is made with the format-view and render-target usage, since `tex_upgrade` cannot replace it. Switch 1 games keep the whole-texture path.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): a headless run went from the out-of-memory stop at frame ~212 to frame ~4,500 in 80 s, with GPU allocations steady at about 9.8 GB. It also renders into its 6144×6144×2 RGBA8 sparse array through an sRGB view.
+
+### A game's wait ends when a failed command buffer completes
+
+- **Symptom:** after a `[RED] command buffer execution error`, the game hangs in `nvnSyncWait` (`mtl_wait_at` → `-[IOSurfaceSharedEvent waitUntilSignaledValue:timeoutMS:]`).
+- **Cause:** a game's wait woke on the shared event the queue signals after each submission, waiting for the whole timeout at once (an hour for `UINT64_MAX`). A failed command buffer still runs its feedback handler, which marks its fence done, but the queue does not signal the event past it.
+- **Fix:** the event is waited for in 20 ms slices, and the wait ends once the feedback handler has passed the fence. A queue that stops completing work after the error is not recovered: the out-of-memory cause above had to go.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (the acquire's `SyncWait` at main+0x25ec590, found by Nvn2Core).
+
 ## Vulkan layer
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.
