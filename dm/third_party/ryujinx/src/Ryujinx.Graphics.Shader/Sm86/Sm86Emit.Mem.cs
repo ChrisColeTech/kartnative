@@ -41,7 +41,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
 
         /// <summary>
         /// ULDC URd, c[bank][offset] (0xab9; bits 24-31 are zero) and ULDC URd, c[bank][URa + offset] (0xabb, the index uniform register in bits 24-29):
-        /// bank in bits 54-58, signed byte offset in 38-53, size in 73-75 (U8, S8, U16, S16, B32, B64). Bit 91 is set on every 0xabb.
+        /// bank in bits 54-58, byte offset in 38-53 (unsigned without an index, as NAK's u16 CBufRef offset; signed with one, as LDC's), size in 73-75
+        /// (U8, S8, U16, S16, B32, B64). Bit 91 is set on every 0xabb.
         /// </summary>
         public static void Uldc(EmitterContext context)
         {
@@ -55,8 +56,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
             }
 
             Operand slot = Const(inst.Field(54, 5));
-            int offset = (short)inst.Field(38, 16);
             bool indexed = inst.Opcode == 0xabb;
+            int offset = indexed ? (short)inst.Field(38, 16) : inst.Field(38, 16);
             int count = size == (int)LsSize2.B64 ? 2 : 1;
 
             Operand[] values = new Operand[count];
