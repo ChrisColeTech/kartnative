@@ -9,6 +9,9 @@
 //   for every format (docs/reference/nvn-objects.md#switch-2-block-linear-gobs).
 // Level / layer start offsets and the actual block height and block depth of this level come from nvn_tex.c; here we only do intra-level addressing and copying.
 #include "nvn_deswizzle.h"
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int nvn_gob_s2;
@@ -84,8 +87,32 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     return 0;
 }
 
+// DM_NVN_UPLOADDUMP=<dir>[:<n>] (diagnostic): every level 0, layer 0 the CPU deswizzles (texture uploads, ReadTexels) is also written to <dir>/<k>_f<format>_<w>x<h>.bin,
+// up to n files (default 200): one text line "nvn format w h depth bpb bw bh pitch rows slices flags target packaged\n", then the linear block rows as passed to Metal.
+// Turned into pictures by a decoder of the texture's Metal format (to check a layout on a game's own data, docs/reference/nvn-objects.md#switch-2-block-linear-gobs)
+static const char *g_dump_dir; static _Atomic int g_dump_max = -1, g_dump_n;
+int nvn_upload_dumping(void) {
+    if (g_dump_max < 0) { const char *e = getenv("DM_NVN_UPLOADDUMP"); static char b[1024]; int m = 0;
+        if (e && *e) { snprintf(b, sizeof b, "%s", e); char *c = strrchr(b, ':'); m = 200; if (c && c[1] >= '0' && c[1] <= '9') { *c = 0; m = atoi(c + 1); } g_dump_dir = b; }
+        g_dump_max = m; }
+    return g_dump_dir != NULL;
+}
+static void upload_dump(const nvn_texdesc *d, const uint8_t *lin, size_t pitch) {
+    if (!nvn_upload_dumping()) return;
+    int k = g_dump_n++; if (k >= g_dump_max) return;
+    uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td; int bw, bh;
+    if (nvn_deswizzle_geom(d, 0, 0, &rb, &rows, &slices, &base, &th, &td, &bpb)) return;
+    nvn_fmt_bpb(d->format, &bw, &bh);
+    char p[1200]; snprintf(p, sizeof p, "%s/%04d_f%02x_%ux%u.bin", g_dump_dir, k, (unsigned)d->format, d->width, d->height);
+    FILE *f = fopen(p, "wb"); if (!f) return;
+    fprintf(f, "nvn %#x %u %u %u %u %d %d %zu %u %u %#x %d %d\n", (unsigned)d->format, d->width, d->height, d->depth, bpb, bw, bh, pitch, rows, slices, (unsigned)d->flags, d->target, d->pkg_block_h);
+    fwrite(lin, 1, pitch * rows * slices, f); fclose(f);
+}
+
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, void *dst, size_t dst_pitch) {
-    return move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1);
+    int r = move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1);
+    if (!r && !level && !layer) upload_dump(d, dst, dst_pitch);
+    return r;
 }
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, size_t src_pitch, void *dst) {
     return move(d, level, layer, (uint8_t *)dst, (uint8_t *)src, src_pitch, 0);

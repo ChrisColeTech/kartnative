@@ -20,10 +20,11 @@ int nvn_deswz_gpu_init(id<MTLDevice> dev) {
 }
 
 // Switch 2 GOBs (nvn_gob_s2): the parameter blocks carry s2 last, and deswz.metal exchanges in-GOB offset bits 5 and 6 when it is set.
+// Under DM_NVN_UPLOADDUMP every entry here declines (-1), so the uploads take the CPU deswizzle, which writes the dump.
 int nvn_deswz_gpu_direct_supported(const nvn_texdesc *d) {
     // Prefer retained compression for large images. This path targets many
     // small array layers where per-face dispatch/copy overhead dominates.
-    return g_nvn_deswz_direct && d && d->format == 0x29 && (d->target == 4 || d->target == 9) &&
+    return g_nvn_deswz_direct && d && d->format == 0x29 && (d->target == 4 || d->target == 9) && !nvn_upload_dumping() &&
         !(d->flags & 0x38) && d->samples <= 1 && d->width && d->height && d->width <= 64 && d->height <= 64 && d->depth >= 32;
 }
 int nvn_deswz_gpu_direct_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
@@ -48,7 +49,7 @@ int nvn_deswz_gpu_direct_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
 int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, uint64_t src_off,
                          const nvn_texdesc *d, unsigned level, unsigned layer,
                          id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
-    if (!g_nvn_deswz_pipeline || !enc || !src || !dst || !d) return -1;
+    if (!g_nvn_deswz_pipeline || !enc || !src || !dst || !d || nvn_upload_dumping()) return -1;
     uint32_t row_bytes, rows, slices, bpb;
     uint64_t base;
     unsigned th, td;
@@ -70,7 +71,7 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
                             id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
                             id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
-    if (!g_nvn_deswz_pipeline || !enc || !table || !params || !src || !dst || !d) return -1;
+    if (!g_nvn_deswz_pipeline || !enc || !table || !params || !src || !dst || !d || nvn_upload_dumping()) return -1;
     uint32_t row_bytes, rows, slices, bpb;
     uint64_t base;
     unsigned th, td;

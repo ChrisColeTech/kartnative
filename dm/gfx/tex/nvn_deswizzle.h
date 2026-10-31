@@ -7,6 +7,8 @@
 // 1 = Switch 2 GOBs (bits 5 and 6 of the in-GOB offset exchanged, nvn_deswizzle.c), for every block-linear address and copy here and in the GPU
 // deswizzle; 0 = Switch 1 (default). A Switch 2 build sets it once at start-up (nvn2_tex.c), before any texture exists.
 extern int nvn_gob_s2;
+// DM_NVN_UPLOADDUMP is set (nvn_deswizzle.c): the CPU deswizzle writes what it decodes to files, so the GPU deswizzle steps aside and every upload takes the CPU path
+int nvn_upload_dumping(void);
 
 // Decode level number level, layer number layer (layer of an array / cube; 0 for non-layered textures) from the whole-texture storage src_storage into linear dst_linear.
 // dst is laid out by block rows: dst_pitch bytes per row (≥ width in blocks of this level × bytes per block); for compressed formats one row = one row of blocks.
