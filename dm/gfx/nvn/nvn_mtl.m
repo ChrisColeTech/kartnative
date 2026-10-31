@@ -1559,8 +1559,16 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
+        // The event is only a fast wake; completion is g_done, which the feedback handler advances. A command buffer that fails (Metal's out-of-memory error) still reaches its
+        // feedback handler, but the queue never signals the event past it, and one wait for the whole timeout (an hour for UINT64_MAX) hung the game in its acquire's SyncWait
+        // (Mario Kart World, fence 828). So the event is waited for in 20 ms slices, and the wait ends once g_done has passed the fence
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        for (uint64_t left = ms;;) {
+            uint64_t s = left < 20 ? left : 20;
+            if ([g_ev waitUntilSignaledValue:fence timeoutMS:s]) { post_early(fence); break; }
+            if (g_done >= fence || left <= s) break;
+            left -= s;
+        }
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
