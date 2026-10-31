@@ -16,6 +16,7 @@ How the host meets each part of a Switch game, and every failure met so far, one
 | [nvn2.md](nvn2.md) | NVN2 (Switch 2): entry points and the API version, object sizes and ABI differences from NVN 55, the shader path and keys, memory pools, present (Mario Kart World) |
 | [rendering.md](rendering.md) | The replay on Metal: textures, passes and clears, blend / depth / stencil, vertex input, uniforms and ordering, conditional rendering; the Vulkan and OpenGL layers |
 | [shaders.md](shaders.md) | Shader containers by engine, control sections and code, translation, bindings and handles, shaders compiled at run time, pipelines and caches |
+| [shaders-sm86.md](shaders-sm86.md) | Switch 2 SM86 programs: the native SM86 frontend in the translator, instruction format, control flow, how to add an opcode, the harness |
 | [cheats.md](cheats.md) | How cheats work on a Switch with Atmosphère (dmnt, the file, the VM, its behaviour on failure) and where this host differs |
 | [game-state.md](game-state.md) | Saves, scripted state, and game behaviour that looks like a host bug but is not |
 
