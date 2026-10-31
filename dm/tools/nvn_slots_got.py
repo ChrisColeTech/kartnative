@@ -43,7 +43,8 @@ i, reg, got_of_reg, cur, fetched, slots, order = LOADER // 4, {}, {}, None, None
 while w[i] != 0xd65f03c0:
     x, pc = w[i], i * 4
     if x & 0x9f000000 == 0x90000000: reg[x & 31] = adrp(x, pc); got_of_reg.pop(x & 31, None)
-    elif x & 0xffc00000 == 0x91000000 and (x & 31) == 1: cur = cstr(reg[(x >> 5) & 31] + ((x >> 10) & 0xfff))
+    elif x & 0xffc00000 == 0x91000000 and (x & 31) == 1:       # add x1, xn, #imm: a name when xn holds an adrp page; any other base (Mario Kart World's loader at main+0xcf5560 has add x1, sp, #imm) is no name
+        rn = (x >> 5) & 31; cur = cstr(reg[rn] + ((x >> 10) & 0xfff)) if rn in reg else None
     elif x & 0xfffffc1f == 0xd63f0000: fetched = cur          # blr: x1 (the name) is consumed here; the result arrives in x0
     elif x & 0xffc00000 == 0xf9400000:                           # ldr xt, [xn, #imm]
         rn, rt = (x >> 5) & 31, x & 31
