@@ -3,8 +3,8 @@ namespace Ryujinx.Graphics.Shader.Sm86
     static partial class Sm86InstTable
     {
         /// <summary>
-        /// Integer, float, logic, comparison and conversion operations (wave 2 "ALU + conversion" family). Base opcodes and modifier bits: Mesa NAK
-        /// sm70_encode.rs (OpMov, OpIAdd3, OpIMad, OpFFma, OpFAdd, OpFMul, OpLop3, OpISetP, OpFSetP, OpMuFu); uniform variants carry Uniform.
+        /// Integer, float, logic, comparison, F16x2 and conversion operations (wave 2 "ALU + conversion" family; emitters in Sm86Emit.Alu.cs,
+        /// .AluHalf.cs and .AluConv.cs). Base opcodes and modifier bits: Mesa NAK sm70_encode.rs; uniform variants carry Uniform.
         /// </summary>
         private static void AddAlu()
         {
@@ -12,21 +12,21 @@ namespace Ryujinx.Graphics.Shader.Sm86
             const Sm86InstProps U = Sm86InstProps.Uniform;
 
             Add("MOV", 0x002, Sm86Forms.BSlot, Sm86Emit.Mov, Rd);
-            Add("UMOV", 0x082, Sm86Forms.I | Sm86Forms.U, Sm86Emit.Mov, U);
+            Add("UMOV", 0x082, Sm86Forms.I | Sm86Forms.U, Sm86Emit.Mov, Rd | U);
 
             Add("IADD3", 0x010, Sm86Forms.All, Sm86Emit.Iadd3, Rd);
-            Add("UIADD3", 0x090, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Iadd3, U);
+            Add("UIADD3", 0x090, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Iadd3, Rd | U);
             Add("IMAD", 0x024, Sm86Forms.All, Sm86Emit.Imad, Rd);
-            Add("UIMAD", 0x0a4, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Imad, U);
+            Add("UIMAD", 0x0a4, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Imad, Rd | U);
             Add("LOP3", 0x012, Sm86Forms.All, Sm86Emit.Lop3, Rd);
-            Add("ULOP3", 0x092, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Lop3, U);
+            Add("ULOP3", 0x092, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Lop3, Rd | U);
             Add("ISETP", 0x00c, Sm86Forms.All, Sm86Emit.Isetp);
             Add("UISETP", 0x08c, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Isetp, U);
             Add("SHF", 0x019, Sm86Forms.All, Sm86Emit.Shf, Rd);
-            Add("USHF", 0x099, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Shf, U);
+            Add("USHF", 0x099, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Shf, Rd | U);
             Add("IMNMX", 0x017, Sm86Forms.All, Sm86Emit.Imnmx, Rd);
             Add("SEL", 0x007, Sm86Forms.All, Sm86Emit.Sel, Rd);
-            Add("USEL", 0x087, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Sel, U);
+            Add("USEL", 0x087, Sm86Forms.R | Sm86Forms.IC | Sm86Forms.I, Sm86Emit.Sel, Rd | U);
             Add("CS2R", 0x805, Sm86Emit.Cs2r, Rd);
 
             Add("FADD", 0x021, Sm86Forms.All, Sm86Emit.Fadd, Rd);
@@ -36,6 +36,18 @@ namespace Ryujinx.Graphics.Shader.Sm86
             Add("MUFU", 0x108, Sm86Forms.BSlot, Sm86Emit.Mufu, Rd);
             Add("FMNMX", 0x009, Sm86Forms.All, Sm86Emit.Fmnmx, Rd);
             Add("FSEL", 0x008, Sm86Forms.All, Sm86Emit.Fsel, Rd);
+
+            // 0x110-0x113 are the conversions with a 64-bit operand.
+            Add("F2F", 0x104, Sm86Forms.BSlot, Sm86Emit.F2f, Rd);
+            Add("F2F.64", 0x110, Sm86Forms.BSlot, Sm86Emit.F2f, Rd);
+            Add("F2I", 0x105, Sm86Forms.BSlot, Sm86Emit.F2i, Rd);
+            Add("F2I.64", 0x111, Sm86Forms.BSlot, Sm86Emit.F2i, Rd);
+            Add("I2F", 0x106, Sm86Forms.BSlot, Sm86Emit.I2f, Rd);
+            Add("I2F.64", 0x112, Sm86Forms.BSlot, Sm86Emit.I2f, Rd);
+            Add("I2FP", 0x045, Sm86Forms.BSlot, Sm86Emit.I2f, Rd);
+            Add("FRND", 0x107, Sm86Forms.BSlot, Sm86Emit.Frnd, Rd);
+            Add("FRND.64", 0x113, Sm86Forms.BSlot, Sm86Emit.Frnd, Rd);
+            Add("F2FP", 0x03e, Sm86Forms.All, Sm86Emit.F2fp, Rd);
         }
     }
 }
