@@ -78,8 +78,9 @@ NVN2(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int mode)
 
 // Variable-rate shading. ShadingRateImagePalette (sdk+0x5fe0a0): (cmd, viewport, count, rates): up to 16 4-bit rates per viewport, entries past count 5, rates NULL turns the
 // palette off. The values follow NVIDIA's shading-rate order (NV_shading_rate_image): 0 no fragment invocations, 1-4 16 / 8 / 4 / 2 per pixel, 5 one per pixel, 6-11 one per 1x2,
-// 2x1, 2x2, 2x4, 4x2, 4x4 pixels. BindShadingRateImage (sdk+0x5fe860) selects the palette entry per screen tile; with none bound (all of MKW's binds are NULL) every tile takes
-// entry 0. MKW sets viewports 0-4 with 16 entries (main+0x403480..0x4034f0) and viewport 0 with one entry around its mesh draws (main+0x5d6684), then turns them off.
+// 2x1, 2x2, 2x4, 4x2, 4x4 pixels. BindShadingRateImage (sdk+0x5fe860) selects the palette entry per screen tile; with none bound every tile takes entry 0 [INFERENCE: as
+// NV_shading_rate_image]. MKW sets viewports 0-4 with 16 entries (main+0x403480..0x4034f0) and viewport 0 with one entry around its mesh draws (main+0x5d6684), then turns them
+// off; it also binds a shading-rate image at run time (seen in the first 22 s of a headless run).
 // Metal has no per-draw coarse shading: its rasterization rate maps resample a whole render pass into a smaller physical target, which the game's targets and shaders are not
 // made for. The host shades every fragment at the full rate: the same picture at a higher cost, except for rate 0, which would draw nothing and cannot be honoured
 NVN2(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int vp, int n, const int *rates) {

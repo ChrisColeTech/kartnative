@@ -905,6 +905,45 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - Drawn unconditionally with no `render_cond`, nothing looked wrong in [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (no screen played looked wrong) or [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (nothing seen).
   - [Portal 2](../../dm/games/0100ABD01785C000/README.md) needs no `render_cond` and must not get it: NVIDIA's occlusion culling in its D3D9 layer (`IDirect3DDevice9::SetOcclusionShape`, `materialsystem.nro+0xc1130`) puts a mesh under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)` when its shape has a query, else `SetRenderEnable(true)`, so drawing everything only costs GPU time. With the key on, those conditions read 0 / 0 at replay (no report in the submission writes the pairs; memory later held `0xffff` / 0) and visible furniture vanished. **Open:** who writes those pairs and when.
 
+## NVN2 command buffers (Switch 2)
+
+What the host does with the command-buffer entries NVN2 adds or changes (`dm/gfx/nvn/nvn2_cmd.c`, registered for Switch 2 builds only; records in `nvn2_cmd.h`). The driver's side of each is in [nvn2.md](nvn2.md#command-buffers).
+
+### Constant bank 24 is the game's push constants
+
+- **Symptom:** SM86 fullscreen programs read constant bank 24, which no uniform bind fills; unbound, they would read the render-area size and its reciprocals as 0 (before the shader build knew the bank it named it a driver segment, which the host would have filled as `c[0]`).
+- **Cause:** `nvnCommandBufferPushGraphicsConstants(cmd, slot, offset, size, data)` writes Ampere's root table (methods 0x504 / 0x508: selector `slot & 7 | (offset & 0xff) << 8`, then the words; sizes above 255 bytes become 256, below 4 nothing, sdk+0x5d34b0), and an SM86 graphics program reads root table *k* as constant bank 24 + *k* (slot 0 = bank 24 is what MKW shows; the higher slots follow the same rule [INFERENCE], as does the offset counting bytes). Earlier work outside this repository took bank 24 for a block the console provides to blits, because the values it holds were in no bound uniform buffer: they are pushed.
+- **Fix:** push records (`OP_PUSH_CONST`) update eight 256-byte blocks kept as queue state with the other bindings (`S.push` in `nvn_mtl.m`, so deferred draws and the lookaheads see them); the shader build names banks 24-31 binding kind `push` (`dmsh_abi.h` `DMSH_KIND_PUSH`, `DMSH_PUSH_BANK0`), and `encode_args` binds a copy of the block from the submission arena. The deferred forms read their bytes when the replay reaches the record, as the driver reads them at submit. Compute pushes (`PushComputeConstants`, the compute constant area at word `slot × 64 + offset / 4 + 0x48`) are dropped with a `[RED]` line: no SM86 compute program has been seen reading them.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its one push (main+0x16d72e8) is `{1/W, 1/H, W, H}` of the render area into slot 0, and the five programs that read bank 24 (vertex `04a209f2e78754bd`, `44a7c58cc83a175c`, `8e51162d7b83d387`; pixel `3b45dca2b9307e8c`, `d6c0f83282009305`) read exactly bytes 0-0xc of it.
+
+### Recording modes replayed in one order
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetRecordingMode`.
+- **Cause:** NVN2's `SetRecordingMode` (0 graphics, 1 compute, 2 copy; 3 / 4 as 0 / 1 with single-segment handles) chooses the hardware engine a recording runs on and how the driver encodes the same commands (GPU methods or queue tokens). Within a command buffer the order stays the recording's; across engines only syncs and barriers order work.
+- **Fix:** nothing is recorded: the replay runs every recording in order on one Metal queue, an order at least as strict, and the host's handles stay record pointers (NVN2 tag 0) in every mode.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (17 call sites, modes 0, 1 and 2).
+
+### Mesh-shader draws recorded, not drawn
+
+- **Symptom:** `[RED] NVN2 mesh-shader draw (DrawMeshTasks family, kind 0) skipped: the replay has no mesh path yet (n skipped so far)`; whatever those draws make (MKW's are task / mesh programs) is missing.
+- **Cause:** the replay has no task / mesh pipeline: the translator does not yet translate MKW's 7 task and 18 mesh programs, and Metal's mesh pipelines (object and mesh functions) are a pipeline kind of their own.
+- **Fix (partial):** every `DrawMeshTasks*` form is recorded with its arguments (`OP_MESH`; a direct draw's record stops before the indirect fields) and the capture walk covers its indirect records, so a mesh path needs only the replay. `SetGeometryProcessingMode`, with which MKW brackets each mesh draw (1 or 2 before, 0 after), is not recorded: the pipeline follows from the program a draw binds.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (9 call sites, `first` 0, `count` = items / 32; a headless run skipped more than 512 of them in its first 212 frames).
+
+### Variable-rate shading at the full rate
+
+- **Symptom:** none visible; `[nvn] NVN2 variable-rate shading (viewport v entry i rate r): shaded at the full rate`.
+- **Cause:** NVN2's `ShadingRateImagePalette` (per viewport up to 16 rates in NVIDIA's order: 0 no invocations, 1-4 several per pixel, 5 one per pixel, 6-11 one per 1×2 … 4×4 pixels), `BindShadingRateImage` (picks a palette entry per screen tile; none bound = entry 0) and `SetShadingRatePaletteMode` ask for coarse shading. Metal has no per-draw coarse shading: rasterization rate maps resample a whole render pass into a smaller physical target, which the game's targets and shaders are not made for.
+- **Fix:** a platform limit, worked around: every fragment is shaded at the full rate, the same picture at a higher GPU cost. A palette entry of 0 (draw nothing) cannot be honoured this way and is logged `[RED]`.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): palettes for viewports 0-4 (main+0x403480) and a one-entry palette around its mesh draws (main+0x5d6684); in the first 22 s of a headless run it also binds a shading-rate image and puts rate 8 (one invocation per 2×2 pixels) in viewport 0's entry 13.
+
+### Hints NVN2 adds that Metal has no use for
+
+- **Symptom:** `[RED] NVN unimplemented function called` for `SetStencilCullCriteria` or `SetComputeOverlapMode`.
+- **Cause:** `SetStencilCullCriteria(func, ref, mask)` tells the zcull unit which stencil test to assume when it culls tiles early; `SetComputeOverlapMode` lets consecutive dispatches overlap. Neither changes a result: one skips work the stencil test would discard, the other permits an order the replay never uses (each dispatch is ordered after everything before it in its encoder, [Compute dispatches share the copy encoder](#compute-dispatches-share-the-copy-encoder)).
+- **Fix:** both are accepted and dropped, as are the engine-forced debug group / marker forms (`…Graphics`, `…Compute`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (`SetStencilCullCriteria(3, 0xff, 0xff)` at main+0x16d73f8; 3 `SetComputeOverlapMode` sites).
+
 ## Vulkan layer
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.
