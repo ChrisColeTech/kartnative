@@ -80,7 +80,7 @@ void dm_guest_thread_join(void *tt) {
     joins++;
 }
 uint64_t now_ns(void) { return 0; }
-void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
+void *dm_pcmout_open(int ch, const char *name) { (void)ch; (void)name; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }

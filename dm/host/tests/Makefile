@@ -24,6 +24,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	$(B)/t_audio
+	$(B)/t_audio_stream
 	$(B)/t_audio_spsc
 	$(B)/t_fpslock
 	$(B)/t_uecvar
@@ -127,6 +128,10 @@ save-sync: $(B)/t_save_sync
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
+# Switch 2 output streams (hle_audio_stream.c) on the host PCM output
+run: $(B)/t_audio_stream
+$(B)/t_audio_stream: t_audio_stream.c ../hle_audio_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stream.c ../hle_bigstack.c -framework AudioToolbox
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
 $(B)/t_audio_device: t_audio_device.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

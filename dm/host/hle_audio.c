@@ -484,16 +484,18 @@ HLE_FORCE("_ZN2nn5audio20GetAudioInSampleRateEPKNS0_7AudioInE", "recording sampl
 HLE_FORCE("_ZN2nn5audio22GetAudioInChannelCountEPKNS0_7AudioInE", "recording channel count", int, h_ai_Ch, const void *g) { (void)g; return 2; }
 HLE_FORCE("_ZN2nn5audio22GetAudioInSampleFormatEPKNS0_7AudioInE", "recording sample format", int, h_ai_Fmt, const void *g) { (void)g; return FMT_PCM16; }
 
-// Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
-void *dm_pcmout_open(int ch) {
+// Host-internal PCM output (the in-process audio renderer, hle_audren.c; Switch 2 output streams, hle_audio_stream.c): the same AudioOut machinery (real output / silent sink / background take-over),
+// keyed by a host-allocated dummy object; name: what the log calls it
+void *dm_pcmout_open(int ch, const char *name) {
     void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
-    if (au_open_at(key, NULL, "AudioRenderer", param, NULL)) die("host PCM output cannot be opened");
+    if (au_open_at(key, NULL, name, param, NULL)) die("host PCM output cannot be opened");
     ao(key)->rel_sem = dispatch_semaphore_create(0);
     return key;
 }
 // Wait until the output releases a block, at most ms milliseconds (spurious returns are fine: the caller checks dm_pcmout_released again)
 void dm_pcmout_wait(void *k, int ms) { dispatch_semaphore_wait(ao(k)->rel_sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * 1000000)); }
 void dm_pcmout_start(void *k) { au_start_at(k, NULL); }
+void dm_pcmout_stop(void *k) { au_stop_at(k, NULL); }   // the pending blocks come back as released (au_release_pending)
 void dm_pcmout_close(void *k) { au_close(k, NULL); free(k); }   // stop, take it out of the registry (frees its AOMAX slot), free it and its key
 int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
 void *dm_pcmout_released(void *k) { return h_au_Released(k); }

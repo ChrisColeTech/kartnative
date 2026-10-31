@@ -19,7 +19,7 @@
 
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
 void dm_guest_thread_join(void *tt);
-void *dm_pcmout_open(int ch);
+void *dm_pcmout_open(int ch, const char *name);
 void dm_pcmout_close(void *k);
 void dm_pcmout_start(void *k);
 int dm_pcmout_append(void *k, void *b);
@@ -96,7 +96,7 @@ typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the fro
 static void render_main(void *arg) {
     (void)arg;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
-    void *out = dm_pcmout_open(2);
+    void *out = dm_pcmout_open(2, "AudioRenderer");
     static int16_t data[NBUF][FRAME_MAX * 2]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
     dm_pcmout_start(out);
