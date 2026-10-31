@@ -61,17 +61,7 @@ uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
     return 0;
 }
 
-typedef struct { const char *name; void *fn; } nvn_impl;
-#define NVN(name, ret, ...)                                                                       \
-    static ret h_##name(__VA_ARGS__);                                                             \
-    static const NVNT_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
-    static ret h_##name(__VA_ARGS__)
-// Newer interfaces without prototypes: no signature check
-#define NVN_NOPROTO(name, ret, ...)                                                               \
-    static ret h_##name(__VA_ARGS__);                                                             \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
-    static ret h_##name(__VA_ARGS__)
+#include "nvn_impl.h"   // NVN / NVN_NOPROTO / NVN2 registration macros
 
 static int g_log;
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -81,20 +71,28 @@ void nvn_serial_floor(uint64_t s) { uint64_t c = atomic_load(&g_serial); while (
 static unsigned g_nsem;                          // Number of semantic implementations (filled by nvn_init_slots)
 #define OLOG(...) do { if (g_log) LOG("[nvn] " __VA_ARGS__); } while (0)
 
-static void nvn_init_slots(void) {
-    static int done; if (done) return; done = 1;
-    g_log = getenv("DM_NVN_LOG") != NULL;
+// Applies one registration section to the slot table; a name registered twice in the same section dies (two files implementing one name)
+static unsigned nvn_apply_section(const char *sect, uint8_t *seen) {
     unsigned long sz;
-    const nvn_impl *im = (const nvn_impl *)getsectiondata(&_mh_execute_header, "__DATA", "swnvn", &sz);
-    unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0, hit = 0;
-    for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
+    const nvn_impl *im = (const nvn_impl *)getsectiondata(&_mh_execute_header, "__DATA", sect, &sz);
+    unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0;
     for (unsigned k = 0; k < nim; k++) {
         unsigned i = 0;
         while (i < NVN_NFUNC && strcmp(nvn_names[i], im[k].name)) i++;
         if (i == NVN_NFUNC) die("NVN implementation %s is not in main's name table", im[k].name);
-        nvn_slot[i].fn = im[k].fn; hit++;
+        if (seen[i]++) die("NVN implementation %s is registered twice in %s", im[k].name, sect);
+        nvn_slot[i].fn = im[k].fn;
     }
-    g_nsem = hit;
+    return nim;
+}
+static void nvn_init_slots(void) {
+    static int done; if (done) return; done = 1;
+    g_log = getenv("DM_NVN_LOG") != NULL;
+    static uint8_t seen[NVN_NFUNC], seen2[NVN_NFUNC];
+    for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
+    g_nsem = nvn_apply_section("swnvn", seen);
+    // Switch 2 (NVN2): implementations whose ABI or semantics differ from NVN1 replace the NVN1 ones (nvn_impl.h); a Switch 1 build never applies them
+    if (DM_GAME_SWITCH2) { unsigned n2 = nvn_apply_section("swnvn2", seen2); for (unsigned i = 0; i < NVN_NFUNC; i++) g_nsem += seen2[i] && !seen[i]; LOG("[nvn] NVN2: %u Switch 2 implementations", n2); }
 }
 
 static void *nvn_lookup(const char *name) {
@@ -108,9 +106,6 @@ static void *nvn_lookup(const char *name) {
 // nvnBootstrapLoader is imported by main (defined in sdk); after it is forcibly taken over, the NVN driver in sdk is no longer referenced
 HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with a host null device (Metal behind it); the SDK's NVN driver does not run",
           void *, h_nvnBootstrapLoader, const char *name) { return nvn_lookup(name); }
-
-// ---------- Boolean parameters: Switch callers do not extend them, only look at the low 8 bits ----------
-#define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
