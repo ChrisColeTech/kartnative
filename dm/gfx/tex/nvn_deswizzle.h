@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include "../nvn/nvn_tex.h"
 
+// 1 = Switch 2 GOBs (bits 5 and 6 of the in-GOB offset exchanged, nvn_deswizzle.c), for every block-linear address and copy here and in the GPU
+// deswizzle; 0 = Switch 1 (default). A Switch 2 build sets it once at start-up (nvn2_tex.c), before any texture exists.
+extern int nvn_gob_s2;
+
 // Decode level number level, layer number layer (layer of an array / cube; 0 for non-layered textures) from the whole-texture storage src_storage into linear dst_linear.
 // dst is laid out by block rows: dst_pitch bytes per row (≥ width in blocks of this level × bytes per block); for compressed formats one row = one row of blocks.
 // 3D textures: all depth slices of this level are decoded at once; slice k is at dst_linear + k × dst_pitch × block row count of this level.

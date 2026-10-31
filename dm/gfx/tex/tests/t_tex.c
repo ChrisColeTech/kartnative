@@ -234,6 +234,55 @@ int main(void) {
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
     }
 
+    // ---------- M Mario Kart World (Switch 2) packaged textures: level offsets and storage of three of its BNTX textures (Tex/*.bntx.zs, BRTI mip offsets and image size) ----------
+    // Every one of MKW's 53,607 packaged textures has the level offsets and storage the host computes from its packaged byte 0 (docs/reference/nvn-objects.md#switch-2-block-linear-gobs)
+    printf("M Mario Kart World packaged layouts (level offsets and storage from its BNTX files)\n");
+    {
+        static const struct { nvn_texdesc d; uint64_t size; uint64_t off[4]; const char *what; } M[] = {
+            {{1, 0x8E, 0, 0, 300, 1021, 1, 10, 0, 5}, 0x1BC00, {0x14000, 0x19000, 0x1A800}, "CmnObj_AccelRing000_Body_Cutout_Alb 300×1021 ASTC 8×8 sRGB, block height 16 GOBs"},
+            {{1, 0x49, 0, 0, 512, 512, 1, 10, 0, 4}, 0x2B400, {0x20000, 0x28000, 0x2A000}, "Map_Grass_0_3_0_3_1_2_Grass 512×512 BC4, layout 0x403 (block height 8 GOBs)"},
+            {{1, 0x12, 0, 0, 512, 512, 1, 10, 0, 5}, 0x155C00, {0x100000, 0x140000, 0x150000}, "Map_GroundHeight 512×512 4-byte texels, layout 0x304 (block height 16 GOBs)"},
+        };
+        for (unsigned i = 0; i < sizeof M / sizeof *M; i++) {
+            nvn_texlayout L; nvn_tex_layout(&M[i].d, &L); int ok = L.size == M[i].size;
+            for (unsigned l = 0; l < 3; l++) ok &= nvn_tex_level_offset(&M[i].d, l + 1) == M[i].off[l];
+            CHECK(ok, "M%u %s: storage %#llx, level 1 at %#llx", i, M[i].what, (unsigned long long)L.size, (unsigned long long)nvn_tex_level_offset(&M[i].d, 1));
+            printf("  M%u %s %s\n", i, ok ? "✓" : "✗", M[i].what);
+        }
+    }
+
+    // ---------- G Switch 2 GOB: bits 5 and 6 of the in-GOB offset exchanged (nvn_gob_s2), found on MKW's textures ----------
+    printf("G Switch 2 GOB (in-GOB offset bits 5 and 6 exchanged)\n");
+    {
+        static const struct { uint32_t x, y; uint64_t s1, s2; } G[] = {
+            {16, 0, 32, 64},     // x%32/16 moves from bit 5 to bit 6
+            {0, 2, 64, 32},      // y%4/2 moves from bit 6 to bit 5
+            {16, 4, 160, 192},   // S1 (4/2)·64 + 32; S2 (4/4)·128 + 64
+            {48, 3, 368, 368},   // both bits set: the same offset
+            {33, 2, 321, 289},   // S1 256 + (2/2)·64 + 1; S2 256 + (2%4/2)·32 + 1
+            {33, 5, 401, 401},   // S1 256 + (5/2)·64 + 16 + 1; S2 256 + (5/4)·128 + 16 + 1
+        };
+        for (unsigned i = 0; i < sizeof G / sizeof *G; i++) {
+            nvn_gob_s2 = 0; uint64_t a = nvn_bl_offset(G[i].x, G[i].y, 0, 64, 8, 0, 0);
+            nvn_gob_s2 = 1; uint64_t b = nvn_bl_offset(G[i].x, G[i].y, 0, 64, 8, 0, 0);
+            CHECK(a == G[i].s1 && b == G[i].s2, "G%u (%u,%u): Switch 1 %llu (expected %llu), Switch 2 %llu (expected %llu)", i, G[i].x, G[i].y,
+                  (unsigned long long)a, (unsigned long long)G[i].s1, (unsigned long long)b, (unsigned long long)G[i].s2);
+        }
+        int perm = 1; uint8_t hit[512] = {0};   // one GOB: a permutation of its 512 bytes, equal to Switch 1's offset with bits 5 and 6 exchanged
+        for (uint32_t y = 0; y < 8; y++) for (uint32_t x = 0; x < 64; x++) {
+            nvn_gob_s2 = 0; uint64_t a = nvn_bl_offset(x, y, 0, 64, 8, 0, 0); nvn_gob_s2 = 1; uint64_t b = nvn_bl_offset(x, y, 0, 64, 8, 0, 0);
+            uint64_t d = ((a >> 5) ^ (a >> 6)) & 1; perm &= b < 512 && !hit[b] && b == (a ^ (d << 5 | d << 6)); if (b < 512) hit[b] = 1;
+        }
+        CHECK(perm, "G the Switch 2 GOB is not Switch 1's with bits 5 and 6 exchanged");
+        printf("  G hand-calculated offsets and the whole-GOB permutation checked\n");
+        nvn_gob_s2 = 1;
+        differential_shapes();   // move()'s Switch 2 segment tables against nvn_bl_offset byte by byte
+        roundtrip("S2 2D 100×37 RGBA8 4 levels", 1, 0x25, 100, 37, 1, 4);
+        roundtrip("S2 2D 300×300 ASTC 8×8 5 levels", 1, 0x80, 300, 300, 1, 5);
+        roundtrip("S2 3D 40×30×9 RGBA32F 3 levels", 2, 0x2E, 40, 30, 9, 3);
+    }
+    nvn_gob_s2 = 0;
+
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
     return fails ? 1 : 0;
 }
