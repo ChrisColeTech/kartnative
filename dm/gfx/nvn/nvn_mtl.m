@@ -2661,6 +2661,7 @@ typedef struct { const void *pool; uint64_t vgen, stamp; int all; } stex_gctx;
 static int stex_mapped(void *c, uint64_t a, uint64_t n) { return nvn_sparse_mapped(((stex_gctx *)c)->pool, a, n); }
 static int stex_changed(void *c, uint64_t a, uint64_t n) { stex_gctx *g = c; return g->all || nvn_sparse_since(g->pool, a, n, g->vgen, g->stamp); }
 static void stex_copy(void *c, void *dst, uint64_t a, uint64_t n) { nvn_sparse_copy(((stex_gctx *)c)->pool, dst, a, n); }
+static uint64_t stex_backing(void *c, uint64_t a) { uint64_t nvn_sparse_backing(const void *, uint64_t); return nvn_sparse_backing(((stex_gctx *)c)->pool, a); }
 // Staging the CPU writes: shared, retired with the upload batch as the whole-texture CPU path's (up_alloc's blocks are GPU-private)
 static id<MTLBuffer> stex_stage(void *c, size_t n, size_t *off) {
     (void)c; id<MTLBuffer> b = [g_dev newBufferWithLength:n ? n : 16 options:MTLResourceStorageModeShared];
@@ -2674,7 +2675,7 @@ static void stex_sync(NvPkg *pk, const tex_t *t, int all) {
     nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size);   // writes from now on are seen by the next check (as pkg_upload_ protects before it reads)
     up_begin();
     stex_gctx gc = {t->pool, pk->vgen, pk->stamp, all};
-    nvn_stex_guest g = {&gc, (uint64_t)(uintptr_t)t->mem, stex_mapped, stex_changed, stex_copy};
+    nvn_stex_guest g = {&gc, (uint64_t)(uintptr_t)t->mem, stex_mapped, stex_changed, stex_copy, stex_backing};
     nvn_stex_host h = {NULL, stex_stage, stex_encoder, stex_resident};
     int64_t n = nvn_stex_sync(pk->stex, g_q4, &g, &h, STEX_BUDGET);
     if (n < 0) RED_ONCE(142, "sparse texture sync failed ser=%llu %ux%ux%u format %#x (no tile heap or staging): its tiles stay as they were", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format);
@@ -2943,11 +2944,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         uint64_t ab = 0, ub = 0; unsigned an = 0;   // every shared texture, resident or not
         pthread_mutex_lock(&g_smu); for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) { id<MTLTexture> t = (__bridge id)g_alias.vals[i]; an++; ab += t.allocatedSize; if (CFSetContainsValue(c_unref, g_alias.vals[i])) ub += t.allocatedSize; } pthread_mutex_unlock(&g_smu);
         uint64_t dq = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) if ([d->object conformsToProtocol:@protocol(MTLResource)] && !d->keep_resident) dq += ((id<MTLResource>)d->object).allocatedSize; pthread_mutex_unlock(&g_deferred_mu);
-        uint64_t sm = nvn_stex_mapped_bytes(), sh = nvn_stex_heap_bytes();
+        uint64_t sm = nvn_stex_mapped_bytes(), st = nvn_stex_tile_bytes(), sh = nvn_stex_heap_bytes();
         MLOG("memory census up to frame %llu (MB): residency set: pool buffers %u / %llu (all pools %llu), other buffers %u / %llu, heaps %u / %llu, shared textures unreferenced %u / %llu, shared textures in use %u / %llu, packaged %u / %llu, serial textures %u / %llu, finalized (ghost) %u / %llu, other textures %u / %llu; "
-             "sharing table %u / %llu (unreferenced %llu); deferred-release queue %llu; sparse tiles mapped %llu of heaps %llu",
+             "sharing table %u / %llu (unreferenced %llu); deferred-release queue %llu; sparse tiles %llu on heap pages %llu of heaps %llu",
              frame, cn[C_POOL], cb[C_POOL] >> 20, pool_all >> 20, cn[C_BUF], cb[C_BUF] >> 20, cn[C_HEAP], cb[C_HEAP] >> 20, cn[C_UNREF], cb[C_UNREF] >> 20, cn[C_ALIAS], cb[C_ALIAS] >> 20, cn[C_PKG], cb[C_PKG] >> 20, cn[C_SER], cb[C_SER] >> 20, cn[C_GHOST], cb[C_GHOST] >> 20, cn[C_TEX], cb[C_TEX] >> 20,
-             an, ab >> 20, ub >> 20, dq >> 20, sm >> 20, sh >> 20);
+             an, ab >> 20, ub >> 20, dq >> 20, st >> 20, sm >> 20, sh >> 20);
         CFRelease(c_pool); }
     CFRelease(c_unref); CFRelease(c_alias); CFRelease(c_pkg); CFRelease(c_ser); CFRelease(c_ghost);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;

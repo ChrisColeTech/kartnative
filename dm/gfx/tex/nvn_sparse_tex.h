@@ -13,6 +13,9 @@ typedef struct {
     int (*mapped)(void *ctx, uint64_t a, uint64_t n);              // every page of [a, a + n) has memory behind it
     int (*changed)(void *ctx, uint64_t a, uint64_t n);             // [a, a + n) was written or mapped since the texture's previous sync (1 when unsure)
     void (*copy)(void *ctx, void *dst, uint64_t a, uint64_t n);    // gathers [a, a + n), unmapped pages as 0
+    // Optional: the memory behind the 64 KB at a, the same number for every virtual tile with the same physical memory behind it (its physical address
+    // when the 64 KB are one run of it), 0 when unknown or not one run. Tiles with the same memory share one heap page (NULL: none share)
+    uint64_t (*backing)(void *ctx, uint64_t a);
 } nvn_stex_guest;
 
 // The host side, the caller's: staging memory and the encoder for the uploads, residency of the heaps
@@ -39,5 +42,6 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
 int nvn_stex_pending(const nvn_stex *s);
 // Unmaps its tiles (their pages go back to the heaps) and releases it; call when the GPU no longer uses the texture
 void nvn_stex_free(nvn_stex *s, id<MTL4CommandQueue> q);
-uint64_t nvn_stex_mapped_bytes(void);   // tile memory mapped by every sparse texture (the heaps can hold more)
-uint64_t nvn_stex_heap_bytes(void);     // the placement heaps those tiles come from (heaps stay once made)
+uint64_t nvn_stex_mapped_bytes(void);   // heap pages in use by every sparse texture (tiles with the same memory share one; the heaps can hold more)
+uint64_t nvn_stex_tile_bytes(void);     // tiles mapped by every sparse texture, shared ones counted for each
+uint64_t nvn_stex_heap_bytes(void);     // the placement heaps those pages come from (heaps stay once made)

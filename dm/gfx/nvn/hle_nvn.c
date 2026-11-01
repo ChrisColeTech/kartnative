@@ -2446,6 +2446,13 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
+// The physical memory behind the 64 KB at a when they are one run of it (its address), else 0: virtual tiles with the same physical memory behind them share one Metal tile (nvn_sparse_tex.m)
+uint64_t nvn_sparse_backing(const void *pool, uint64_t a) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); const uint8_t *p0 = NULL;
+    if (v) { uint64_t o = a - (uint64_t)(uintptr_t)v->base; const vpte *e = (o & 0xFFF) || o + 0x10000 > v->size ? NULL : vpt_get(v, o); p0 = e ? e->phys : NULL;
+        for (unsigned i = 1; p0 && i < 16; i++) { const vpte *f = vpt_get(v, o + i * 0x1000ull); if (!f || f->phys != p0 + i * 0x1000) p0 = NULL; } }
+    pthread_mutex_unlock(&g_vp_mu); return (uint64_t)(uintptr_t)p0;
+}
 // Diagnostic (the memory census, DM_NVN_MEMTOP): what the sparse pools map, in 4 KB pages: virtual pages with memory behind them, and the distinct physical pages behind those
 static int cmp_ptr(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
 void nvn_sparse_census(uint64_t *virt_bytes, uint64_t *phys_bytes) {

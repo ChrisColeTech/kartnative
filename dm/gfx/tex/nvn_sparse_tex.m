@@ -6,20 +6,30 @@
 // keeps a level that is a tile wide but less than a tile high as tiles), so the guest's tail maps and fills Metal's tiles of those levels and its tail.
 #import "nvn_sparse_tex.h"
 #include "nvn_deswizzle.h"
+#include "../nvn/nvn_hmap.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 enum { TILE = 0x10000, HEAP_PAGES = 2048, MAXLV = 16 };   // 64 KB tiles; heaps of 128 MB
 
-typedef struct { void *heap; uint32_t nfree; uint16_t free[HEAP_PAGES]; } sheap;   // heap: retained id<MTLHeap>; free: a stack of free page indices
+// heap: retained id<MTLHeap>; free: a stack of free page indices; ref: the tiles mapped to each page; key: the guest memory a shared page holds (0: one tile's own)
+typedef struct { void *heap; uint32_t nfree; uint16_t free[HEAP_PAGES]; uint32_t ref[HEAP_PAGES]; uint64_t key[HEAP_PAGES]; } sheap;
 static sheap **g_heaps; static unsigned g_nheaps;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_pages;   // pages mapped, under g_mu
+static uint64_t g_pages, g_tiles;   // heap pages in use / tiles mapped to them, under g_mu
+// Tiles with the same memory behind them share one heap page. Mario Kart World maps 3.47 GB of virtual pages of its sparse pools onto 0.98 GB of
+// physical pages (the same physical tile behind many virtual tiles); a page of its own for each tile took 2.9 GB of heaps by the first race and 4.1 GB
+// by the third. Key: the guest's physical address of the tile's 64 KB (one contiguous run) with the pixel format, which decides the tile's layout in
+// the page; value: heap page + 1. Under g_mu
+static nvn_hmap g_shared = {.klen = 8};
+static uint64_t share_key(uint64_t phys, MTLPixelFormat pf) { return phys ? phys | (uint64_t)pf << 52 : 0; }
 
-typedef struct { int32_t page; uint8_t dirty; } ent;   // page: heap index << 16 | page index (a tile), 0 (the mip tail entry, mapped), -1 = unmapped
+typedef struct { int32_t page; uint8_t dirty; uint64_t key; } ent;   // page: heap index << 16 | page index (a tile), 0 (the mip tail entry, mapped), -1 = unmapped; key: its page's share key (0: not shared)
 struct nvn_stex {
     void *tex;                       // retained id<MTLTexture>
+    MTLPixelFormat pf;
+    int share;                       // its tiles may share heap pages (block-compressed formats: see g_shared)
     nvn_texdesc d, tile;             // the texture; one 64 KB tile as a block-linear texture of its own (for nvn_deswizzle)
     nvn_texlayout L;
     unsigned slices, levels, tiled, mtail, tail_pages, bw, bh, bpb;   // tiled: the guest's tiled levels; mtail: Metal's first level in its tail (levels when none)
@@ -52,7 +62,7 @@ nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_
     if (!t) return NULL;
     nvn_stex *s = calloc(1, sizeof *s);
     s->d = *d; nvn_tex_layout(d, &s->L); s->levels = d->levels ? d->levels : 1;
-    int bw, bh; s->bpb = (unsigned)nvn_fmt_bpb(d->format, &bw, &bh); s->bw = (unsigned)bw; s->bh = (unsigned)bh;
+    int bw, bh; s->bpb = (unsigned)nvn_fmt_bpb(d->format, &bw, &bh); s->bw = (unsigned)bw; s->bh = (unsigned)bh; s->share = bw > 1;
     uint32_t tdp; s->tiled = (unsigned)nvn_tex_sparse_tiles(d, &s->tw, &s->th, &tdp);
     s->mtail = (unsigned)MIN(t.firstMipmapInTail, (NSUInteger)s->levels);
     s->slices = d->target == 4 ? (d->depth ? d->depth : 1) : 1;
@@ -75,7 +85,8 @@ nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_
     s->tail_tiles += s->tail_pages;
     if (s->tiled < s->levels) s->per_slice++;   // the guest's mip tail
     s->e = malloc(sizeof *s->e * s->per_slice * s->slices);
-    for (size_t i = 0; i < (size_t)s->per_slice * s->slices; i++) s->e[i] = (ent){-1, 0};
+    for (size_t i = 0; i < (size_t)s->per_slice * s->slices; i++) s->e[i] = (ent){-1, 0, 0};
+    s->pf = td.pixelFormat;
     s->tailpg = malloc(sizeof *s->tailpg * (s->tail_tiles ? s->tail_tiles : 1) * s->slices);
     s->tex = (__bridge_retained void *)t;
     return s;
@@ -84,27 +95,38 @@ nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_
 id<MTLTexture> nvn_stex_texture(const nvn_stex *s) { return s ? (__bridge id<MTLTexture>)s->tex : nil; }
 int nvn_stex_pending(const nvn_stex *s) { return s && s->pending; }
 uint64_t nvn_stex_mapped_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_pages * TILE; pthread_mutex_unlock(&g_mu); return b; }
+uint64_t nvn_stex_tile_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_tiles * TILE; pthread_mutex_unlock(&g_mu); return b; }
 uint64_t nvn_stex_heap_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = (uint64_t)g_nheaps * HEAP_PAGES * TILE; pthread_mutex_unlock(&g_mu); return b; }
 
-static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h) {   // → heap << 16 | page, -1
+// A heap page for one tile (→ heap << 16 | page, -1 when no heap can be had): the page already holding key's memory if there is one (key 0: a page of its own)
+static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key) {
     pthread_mutex_lock(&g_mu);
-    for (unsigned i = 0; i < g_nheaps; i++)
-        if (g_heaps[i]->nfree) { int p = (int)(i << 16 | g_heaps[i]->free[--g_heaps[i]->nfree]); g_pages++; pthread_mutex_unlock(&g_mu); return p; }
-    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
-    hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)HEAP_PAGES * TILE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
-    id<MTLHeap> heap = g_nheaps < 0x8000 ? [dev newHeapWithDescriptor:hd] : nil;
-    if (!heap) { pthread_mutex_unlock(&g_mu); return -1; }
-    sheap *hp = calloc(1, sizeof *hp); hp->heap = (__bridge_retained void *)heap;
-    for (unsigned k = 0; k < HEAP_PAGES; k++) hp->free[k] = (uint16_t)(HEAP_PAGES - 1 - k);   // pops 0, 1, 2, …
-    hp->nfree = HEAP_PAGES - 1; g_pages++;                                                     // page 0 is this call's
-    g_heaps = realloc(g_heaps, sizeof *g_heaps * (g_nheaps + 1)); g_heaps[g_nheaps] = hp;
-    unsigned i = g_nheaps++;
+    void *sh = key ? nvn_hm_get(&g_shared, &key) : NULL;
+    if (sh) { int p = (int)((intptr_t)sh - 1); g_heaps[p >> 16]->ref[p & 0xffff]++; g_tiles++; pthread_mutex_unlock(&g_mu); return p; }
+    int p = -1; id<MTLHeap> fresh = nil;
+    for (unsigned i = 0; i < g_nheaps && p < 0; i++) if (g_heaps[i]->nfree) p = (int)(i << 16 | g_heaps[i]->free[--g_heaps[i]->nfree]);
+    if (p < 0) {
+        MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+        hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)HEAP_PAGES * TILE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+        fresh = g_nheaps < 0x8000 ? [dev newHeapWithDescriptor:hd] : nil;
+        if (!fresh) { pthread_mutex_unlock(&g_mu); return -1; }
+        sheap *hp = calloc(1, sizeof *hp); hp->heap = (__bridge_retained void *)fresh;
+        for (unsigned k = 0; k < HEAP_PAGES; k++) hp->free[k] = (uint16_t)(HEAP_PAGES - 1 - k);   // pops 0, 1, 2, …
+        hp->nfree = HEAP_PAGES - 1;                                                                // page 0 is this call's
+        g_heaps = realloc(g_heaps, sizeof *g_heaps * (g_nheaps + 1)); g_heaps[g_nheaps] = hp;
+        p = (int)(g_nheaps++ << 16);
+    }
+    sheap *hp = g_heaps[p >> 16]; hp->ref[p & 0xffff] = 1; hp->key[p & 0xffff] = key;
+    if (key) nvn_hm_put(&g_shared, &key, (void *)(intptr_t)(p + 1));
+    g_pages++; g_tiles++;
     pthread_mutex_unlock(&g_mu);
-    if (h && h->resident) h->resident(h->ctx, heap);
-    return (int)(i << 16);
+    if (fresh && h && h->resident) h->resident(h->ctx, fresh);
+    return p;
 }
-static void page_free(int p) {
-    pthread_mutex_lock(&g_mu); sheap *hp = g_heaps[p >> 16]; hp->free[hp->nfree++] = (uint16_t)(p & 0xffff); g_pages--; pthread_mutex_unlock(&g_mu);
+static void page_free(int p) {   // one tile less on the page; the last one frees it
+    pthread_mutex_lock(&g_mu); sheap *hp = g_heaps[p >> 16]; unsigned i = (unsigned)(p & 0xffff);
+    if (!--hp->ref[i]) { if (hp->key[i]) nvn_hm_del(&g_shared, &hp->key[i]); hp->key[i] = 0; hp->free[hp->nfree++] = (uint16_t)i; g_pages--; }
+    g_tiles--; pthread_mutex_unlock(&g_mu);
 }
 
 typedef struct { MTL4UpdateSparseTextureMappingOperation op; int heap; } mapop;   // heap -1: an unmap
@@ -147,20 +169,20 @@ static void tail_tile(const nvn_stex *s, unsigned j, unsigned *lv, MTLRegion *r)
     }
     *lv = s->mtail; *r = MTLRegionMake3D(j, 0, 0, 1, 1, 1);
 }
-// Maps (map = 1) or unmaps an entry's Metal tiles; -1 when no heap page can be had (nothing of the entry stays mapped then)
-static int ent_map(nvn_stex *s, oplist *o, id<MTLDevice> dev, const nvn_stex_host *h, unsigned z, unsigned k, int map) {
+// Maps (map = 1) or unmaps an entry's Metal tiles; -1 when no heap page can be had (nothing of the entry stays mapped then). key: the share key of a tile's memory (page_alloc)
+static int ent_map(nvn_stex *s, oplist *o, id<MTLDevice> dev, const nvn_stex_host *h, unsigned z, unsigned k, int map, uint64_t key) {
     ent *e = &s->e[(size_t)z * s->per_slice + k];
     uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, k, &a, &n, &lv, &x, &y);
     if (lv < s->tiled) {
-        if (!map) { op_add(o, 0, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, 0); page_free(e->page); e->page = -1; return 0; }
-        int p = page_alloc(dev, h); if (p < 0) return -1;
-        op_add(o, 1, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, p); e->page = p; return 0;
+        if (!map) { op_add(o, 0, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, 0); page_free(e->page); e->page = -1; e->key = 0; return 0; }
+        int p = page_alloc(dev, h, key); if (p < 0) return -1;
+        op_add(o, 1, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, p); e->page = p; e->key = key; return 0;
     }
     int32_t *pg = s->tailpg + (size_t)z * s->tail_tiles;
     for (unsigned j = 0; j < s->tail_tiles; j++) {
         unsigned tl; MTLRegion r; tail_tile(s, j, &tl, &r);
         if (!map) { op_add(o, 0, r, tl, z, 0); page_free(pg[j]); continue; }
-        int p = page_alloc(dev, h);
+        int p = page_alloc(dev, h, 0);
         if (p < 0) { while (j--) { tail_tile(s, j, &tl, &r); op_add(o, 0, r, tl, z, 0); page_free(pg[j]); } return -1; }
         op_add(o, 1, r, tl, z, p); pg[j] = p;
     }
@@ -190,9 +212,16 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
         uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, k, &a, &n, &lv, &x, &y);
         // A tile has memory or not; a mip tail of several 64 KB pages has memory when any of them has (its unmapped pages read 0, as on the GPU)
         int m = 0; for (uint64_t p = 0; p < n && !m; p += TILE) m = g->mapped(g->ctx, g->base + a + p, MIN((uint64_t)TILE, n - p));
-        if (!m) { if (e->page >= 0) ent_map(s, &o, t.device, h, z, k, 0); e->dirty = 0; continue; }
-        if (e->page < 0) { if (ent_map(s, &o, t.device, h, z, k, 1)) fail = 1; else e->dirty = 1; }
-        else if (g->changed(g->ctx, g->base + a, n)) e->dirty = 1;
+        if (!m) { if (e->page >= 0) ent_map(s, &o, t.device, h, z, k, 0, 0); e->dirty = 0; continue; }
+        // A tile's share key, asked for only when it is mapped anew or its pages changed (a new mapping in its range is a change): a tile whose memory moved
+        // leaves the page it shared. A tile mapped anew is always uploaded, so the page holds the memory as it is now, whoever uploaded it before
+        #define KEY() (s->share && lv < s->tiled && g->backing ? share_key(g->backing(g->ctx, g->base + a), s->pf) : 0)
+        if (e->page < 0) { if (ent_map(s, &o, t.device, h, z, k, 1, KEY())) fail = 1; else e->dirty = 1; }
+        else if (g->changed(g->ctx, g->base + a, n)) {
+            e->dirty = 1; uint64_t key = KEY();
+            if (key != e->key) { ent_map(s, &o, t.device, h, z, k, 0, 0); if (ent_map(s, &o, t.device, h, z, k, 1, key)) { fail = 1; e->dirty = 0; } }
+        }
+        #undef KEY
     }
     ops_apply(q, t, &o); free(o.v);
     // The entries uploaded now (up to the budget), their staging taken in one piece, then deswizzled into it, then the copies encoded
@@ -237,7 +266,7 @@ void nvn_stex_free(nvn_stex *s, id<MTL4CommandQueue> q) {
     if (!s) return;
     id<MTLTexture> t = (__bridge_transfer id<MTLTexture>)s->tex; oplist o = {0};
     for (unsigned z = 0; z < s->slices; z++) for (unsigned k = 0; k < s->per_slice; k++)
-        if (s->e[(size_t)z * s->per_slice + k].page >= 0) ent_map(s, &o, t.device, NULL, z, k, 0);
+        if (s->e[(size_t)z * s->per_slice + k].page >= 0) ent_map(s, &o, t.device, NULL, z, k, 0, 0);
     if (q) ops_apply(q, t, &o);
     free(o.v); free(s->e); free(s->tailpg); free(s);
 }
