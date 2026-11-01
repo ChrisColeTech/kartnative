@@ -327,10 +327,20 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 ### Maps past the application pool fail as on Horizon
 
-- **Symptom:** the alias region's mapped total runs past the application pool in the first minute.
-- **Cause:** `nninitStartup` allocates and frees everything allocatable (pool − used, 3.15 GB, mapped at the top of the region) and the SDK keeps the freed pages mapped; later allocations map new pages at the bottom until a map fails, and only then does it unmap the cached block and retry. The host never refused a map, so the block stayed mapped beside the 0.4 GB the game used.
+- **Symptom:** the alias region's mapped total runs past the application pool in the first minute; or memory grows course after course with the alias region's mapped total past the pool and never falling.
+- **Cause:** on Horizon the used memory `GetInfo` reports counts the pages mapped with `MapPhysicalMemory`, and a map past the pool fails; the host did neither. Two ways games depend on it:
+  - `nninitStartup` allocates and frees everything allocatable (pool − used, 3.15 GB, mapped at the top of the region) and the SDK keeps the freed pages mapped; later allocations map new pages at the bottom until a map fails, and only then does it unmap the cached block and retry. The host never refused a map, so the block stayed mapped beside the 0.4 GB the game used.
+  - A heap whose free size is what the system reports free (total − used) never sees its own maps if the used memory leaves them out, so it never lets its blocks go: Mario Kart World's `NinVirtualAddressHeap` held 2.36 GB by its fourth race, past the 1.54 GB the pool leaves beside its heap.
 - **Fix:** profile key `mem_map_limit` (`hle_svc.c`): a map past the pool fails with ResultLimitReached, and the used memory `GetInfo` reports counts the mapped pages, as on Horizon (without that, the startup probe itself, sized as total − used, was refused).
-- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot). Measured: one refused 4 MB map, the 3.15 GB unmap, the same map again.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot). Measured: one refused 4 MB map, the 3.15 GB unmap, the same map again. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#memory) (1.0.0, SDK 19.3.3): with the key the alias region stays at 1.0-1.25 GB mapped over 175,500 frames with no map refused, and resident memory at 11.0-12.2 GB instead of 13-14 GB.
+
+### Unmapped alias-region pages given back as reusable
+
+- **Symptom:** `DM_MEMSTAT` charges the guest block outside the heap far more than the alias region has mapped (`[mem] alias region mapped`), and the gap does not shrink: the game unmaps and maps again, and the process stays charged for what it unmapped.
+- **Cause:** `UnmapPhysicalMemory` protected the pages and called `MADV_FREE`. On Darwin that drops resident pages but leaves the ones the system had compressed charged to the process: in a test program, after half of a 1 GB range with 246 MB compressed was released, all 246 MB stayed compressed and the footprint 123 MB above the expected. `MADV_FREE_REUSABLE` (Darwin's malloc's call) or a fresh `MAP_FIXED` mapping took both back, but `MADV_FREE_REUSABLE` is refused on pages that are not writable.
+- **Fix:** `alias_release` (`hle_svc.c`) gives each run of host pages that were mapped back with `MADV_FREE_REUSABLE` before the range is protected (an SDK unmap may cover pages it never mapped, which are not writable), `MADV_FREE` where it is refused; the next map calls `MADV_FREE_REUSE`. It is right for every game, as Horizon returns unmapped pages to the pool, but gated to Switch 2 builds (`DM_GAME_SWITCH2`) until a Switch 1 regression run confirms it; Switch 1 builds keep `mprotect` and `MADV_FREE`.
+- **Check:** `t_svc_memory` and `t_svc_memory_switch2` (`make -C dm/host/tests memory`): the footprint falls over an unmap that runs past what was mapped, and the next map reads zeros. A unit test cannot force compression; the test program above measured it under memory pressure.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#memory): with `mem_map_limit` the guest block outside the heap was charged 3.26 GB with 1.25 GB mapped; with the fix, 2.15 GB at the same second of the same route (2.71 GB before).
 
 ### `GetInfo(UserExceptionContextAddress)` returns a real buffer
 
