@@ -144,6 +144,11 @@ class Host(unittest.TestCase):
         assert m, 'Program.cs C2HandleWords line not found'
         self.assertEqual(int(m.group(1)), abi.C2_SEP_SLOTS)
         self.assertEqual(abi.C2_ROW, 8)
+        # the translator's global pointer table layout (GlobalPointers.cs keeps its own copy)
+        gp = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalPointers.cs').read_text()
+        consts = dict(re.findall(r'public const (?:int|string) (\w+) = "?(\w+)"?;', gp))
+        self.assertEqual(consts['TableName'], abi.GPTR_MEMBER)
+        self.assertEqual((int(consts['HeaderWords']) * 4, int(consts['EntryWords']) * 4, int(consts['SearchSteps'])), (abi.GPTR_HEADER, abi.GPTR_ENTRY, abi.GPTR_STEPS))
 
 
 class Ratchet(unittest.TestCase):

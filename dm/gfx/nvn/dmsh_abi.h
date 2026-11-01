@@ -72,6 +72,18 @@
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_build.py border_emu): a mask of the samplers to correct, then each one's factors
 #define DMSH_KIND_PUSH "push"            // an NVN2 push-constant block, reg = its index (bank - DMSH_PUSH_BANK0)
+#define DMSH_KIND_GPTR "gptr"            // the host's global pointer table (below)
+
+// Global memory through a pointer the shader read from memory (an SM86 program's LDG / STG whose address no constant buffer holds; Mario Kart World: 2 programs): the
+// translator (Ryujinx Translation/Optimizations/GlobalPointers.cs, which keeps its own copy of these numbers) looks the guest address up in a table the host fills and binds as
+// the argument buffer member DMSH_GPTR_MEMBER, kind DMSH_KIND_GPTR (nvn_mtl.m gptr_gpu), and accesses the host GPU address through a pointer. The table: a header of
+// DMSH_GPTR_HEADER bytes, {u32 DMSH_GPTR_STEPS - log2(entries), u32 misses, u64 the last missed address}, then a power of two of DMSH_GPTR_ENTRY-byte entries {u64 start, u64 end
+// (exclusive), u64 host address - guest address, u64 0}, sorted by start and not overlapping, the last a sentinel starting at 2^64 - 1. The search has DMSH_GPTR_STEPS fixed
+// steps, so at most 2^DMSH_GPTR_STEPS entries; an address in no entry reads 0, stores nothing, and counts a miss the host logs
+#define DMSH_GPTR_MEMBER "dm_gptr"       // the table's name in the SPIR-V and the MSL
+#define DMSH_GPTR_HEADER 16
+#define DMSH_GPTR_ENTRY 32
+#define DMSH_GPTR_STEPS 16
 
 // NVN2 push constants (nvnCommandBufferPushGraphicsConstants: Ampere's root table, methods 0x504 / 0x508): block k (up to 256 bytes) is constant bank DMSH_PUSH_BANK0 + k of an
 // SM86 graphics program; the host binds the bytes the command buffer pushed last (nvn_mtl.m). Mario Kart World pushes {1/W, 1/H, W, H} into block 0

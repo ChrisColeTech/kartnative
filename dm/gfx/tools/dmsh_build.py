@@ -778,6 +778,7 @@ def reflect(key, stage, msl, res, pack=None):
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
         elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
+        elif nm == abi.GPTR_MEMBER: e.update(kind=abi.KIND_GPTR, rw=True)   # the host's global pointer table (dmsh_abi.h DMSH_GPTR_*): the shader counts its misses in it
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(re.fullmatch(r'[a-z]+_c(\d+)', nm).group(1))
             if 3 <= n <= 16: e.update(kind=abi.KIND_CBUF, reg=n - 3)

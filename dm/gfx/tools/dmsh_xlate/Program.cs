@@ -143,6 +143,9 @@ static class SwshXlate
         // Job softfloat64 = true: the host has no FP64, so Ryujinx's DoubleToFloat pass lowers double operations to float (Metal has no double type). Set only on the retry of a
         // shader whose first translation declared a 64-bit float (see Main): answering "no" for every shader would also drop the Float64 capability from all the others
         public bool QueryHostSupportsShaderFloat64() => !(_job["softfloat64"] is JsonNode n && (bool)n);
+        // SM86 programs translate global memory through a pointer read from memory by the host's address table (GlobalPointers.cs, dmsh_abi.h DMSH_GPTR_*); Maxwell programs keep
+        // Ryujinx's answer (such an access reads 0 and stores nothing), which leaves their output unchanged
+        public bool QueryGlobalPointerTable() => (string)_job["isa"] == "sm86";
     }
 
     // True when the SPIR-V declares a 64-bit float type (OpTypeFloat 64): SPIRV-Cross then writes double, which the Metal compiler rejects
