@@ -58,7 +58,7 @@ jobs:
           make GAME="$GAME" -j3 t_perf_order
           ./t_perf_order --cpu 2>&1 | tee ../../../logs/t_perf_order.log
           make GAME="$GAME" -j3 perf-order-tsan 2>&1 | tee ../../../logs/t_perf_order-tsan.log
-          tests="t_gfx_suspend t_capture t_dirty_slots t_dirty_race t_dirty_retire_race t_tex_layout t_pace t_fstep t_link_ticks t_cpu_tex t_hmap t_cover t_pso_skey t_refl t_rt_range_ro t_present_rescue t_gpuprof t_sparse_layout t_timestamp t_rt_depth_ro t_rt_range_shape t_ub t_pso_pending t_vk_desc"
+          tests="t_gfx_suspend t_capture t_dirty_slots t_dirty_race t_dirty_retire_race t_tex_layout t_pace t_fstep t_link_ticks t_vtick t_cpu_tex t_hmap t_cover t_pso_skey t_shader_key t_refl t_rt_range_ro t_present_rescue t_gpuprof t_sparse_layout t_timestamp t_rt_depth_ro t_rt_range_shape t_ub t_pso_pending t_vk_desc"
           make GAME="$GAME" -j3 $tests 2>&1 | tee ../../../logs/gfx-build.log
           failed=0
           for t in $tests; do
@@ -219,11 +219,11 @@ jobs:
           xcodebuild -version
           xcrun metal --version
           python3 dm/gfx/tools/own_compilers.py --check-metal
-      - name: Mac host for three profiles (Vulkan, NVN, OpenGL)
+      - name: Mac host for four profiles (Vulkan, NVN, OpenGL, NVN2)
         run: |
           mkdir -p logs
-          # Wonder: NVN; Hades: Vulkan; Digimon Story Cyber Sleuth: OpenGL. The second and third reuse the libvpx build in dm/host/gen/vpx.
-          for g in 010015100B514000 0100535012974000 010014E00DB56000; do
+          # Wonder: NVN; Hades: Vulkan; Digimon Story Cyber Sleuth: OpenGL; Mario Kart World: NVN2 (Switch 2). The others reuse the libvpx build in dm/host/gen/vpx.
+          for g in 010015100B514000 0100535012974000 010014E00DB56000 0400C3F00006E000; do
             echo "::group::dmhost $g"
             make -C dm/host GAME=$g -j3 dmhost 2>&1 | tee "logs/dmhost-$g.log"
             test -x dm/host/dmhost
