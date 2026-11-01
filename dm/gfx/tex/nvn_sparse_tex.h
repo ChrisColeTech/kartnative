@@ -32,12 +32,17 @@ typedef struct nvn_stex nvn_stex;
 // of the pixel format equal to the guest's (the standard 64 KB tile shapes on both sides). Others keep the whole-texture path.
 int nvn_stex_wanted(id<MTLDevice> dev, const nvn_texdesc *d, MTLPixelFormat pf, uint64_t min_bytes);
 // desc: the texture as the caller would create it (type, format, size, levels, usage); the sparse texture has no memory until its first sync. NULL when
-// Metal's tiles or mip tail differ from the guest's
-nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_texdesc *d);
+// Metal's tiles or mip tail differ from the guest's. gpu: a texture only the GPU writes (a sparse render target): its tiles are never uploaded (the guest's
+// copy has no copy function), a tile's page is the memory the GPU writes, shared with every tile of one physical memory, and a page of its own starts as zeros
+nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_texdesc *d, int gpu);
 id<MTLTexture> nvn_stex_texture(const nvn_stex *s);
+// Gives the caller the texture's reference: the texture then lives as long as the caller keeps it, and nvn_stex_free (called when it goes, with q nil)
+// only gives the pages back
+id<MTLTexture> nvn_stex_take(nvn_stex *s);
 // Brings the tiles in line with the guest: maps those whose guest pages have memory and unmaps those that lost it (mapping updates on q, so they
 // come before the upload batch's command buffer, which must be committed to q later), then encodes the uploads of mapped tiles that changed, up to
 // budget bytes (0 = no limit). Returns the bytes uploaded, -1 on a failure (no heap, no staging). Tiles left over stay pending (nvn_stex_pending).
+// A GPU-written texture's guest gives copy NULL: its uploads are the zeros of new pages
 int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest *g, const nvn_stex_host *h, uint64_t budget);
 int nvn_stex_pending(const nvn_stex *s);
 // Unmaps its tiles (their pages go back to the heaps) and releases it; call when the GPU no longer uses the texture

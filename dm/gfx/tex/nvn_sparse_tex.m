@@ -23,13 +23,15 @@ static uint64_t g_pages, g_tiles;   // heap pages in use / tiles mapped to them,
 // by the third. Key: the guest's physical address of the tile's 64 KB (one contiguous run) with the pixel format, which decides the tile's layout in
 // the page; value: heap page + 1. Under g_mu
 static nvn_hmap g_shared = {.klen = 8};
-static uint64_t share_key(uint64_t phys, MTLPixelFormat pf) { return phys ? phys | (uint64_t)pf << 52 : 0; }
+static uint64_t share_key(uint64_t phys, MTLPixelFormat pf, int gpu) { return phys ? phys | (uint64_t)pf << 52 | (uint64_t)gpu << 62 : 0; }
 
 typedef struct { int32_t page; uint8_t dirty; uint64_t key; } ent;   // page: heap index << 16 | page index (a tile), 0 (the mip tail entry, mapped), -1 = unmapped; key: its page's share key (0: not shared)
 struct nvn_stex {
-    void *tex;                       // retained id<MTLTexture>
+    void *tex;                       // id<MTLTexture>, retained while owned
     MTLPixelFormat pf;
-    int share;                       // its tiles may share heap pages (block-compressed formats: see g_shared)
+    int share;                       // its tiles may share heap pages (block-compressed formats, and every GPU-written texture: see g_shared)
+    int gpu;                         // GPU-written (nvn_stex_new): tiles are never uploaded, a page of its own starts as zeros
+    int owned;                       // tex holds a reference (until nvn_stex_take)
     nvn_texdesc d, tile;             // the texture; one 64 KB tile as a block-linear texture of its own (for nvn_deswizzle)
     nvn_texlayout L;
     unsigned slices, levels, tiled, mtail, tail_pages, bw, bh, bpb;   // tiled: the guest's tiled levels; mtail: Metal's first level in its tail (levels when none)
@@ -54,15 +56,18 @@ int nvn_stex_wanted(id<MTLDevice> dev, const nvn_texdesc *d, MTLPixelFormat pf, 
     return ts.width == tw && ts.height == th && ts.depth == 1;
 }
 
-nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_texdesc *d) {
+nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_texdesc *d, int gpu) {
     if (!nvn_stex_wanted(dev, d, desc.pixelFormat, 0)) return NULL;
     MTLTextureDescriptor *td = [desc copy];
     td.storageMode = MTLStorageModePrivate; td.placementSparsePageSize = MTLSparsePageSize64;
+    // A GPU-written texture's tiles share pages by their physical memory as on the GPU (g_shared), whatever the format: it is not compressed losslessly,
+    // whose metadata would not follow a page written through another texture (block-compressed formats are never compressed so)
+    if (gpu) td.allowGPUOptimizedContents = NO;
     id<MTLTexture> t = [dev newTextureWithDescriptor:td];
     if (!t) return NULL;
     nvn_stex *s = calloc(1, sizeof *s);
     s->d = *d; nvn_tex_layout(d, &s->L); s->levels = d->levels ? d->levels : 1;
-    int bw, bh; s->bpb = (unsigned)nvn_fmt_bpb(d->format, &bw, &bh); s->bw = (unsigned)bw; s->bh = (unsigned)bh; s->share = bw > 1;
+    int bw, bh; s->bpb = (unsigned)nvn_fmt_bpb(d->format, &bw, &bh); s->bw = (unsigned)bw; s->bh = (unsigned)bh; s->share = bw > 1 || gpu; s->gpu = gpu; s->owned = 1;
     uint32_t tdp; s->tiled = (unsigned)nvn_tex_sparse_tiles(d, &s->tw, &s->th, &tdp);
     s->mtail = (unsigned)MIN(t.firstMipmapInTail, (NSUInteger)s->levels);
     s->slices = d->target == 4 ? (d->depth ? d->depth : 1) : 1;
@@ -98,11 +103,12 @@ uint64_t nvn_stex_mapped_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g
 uint64_t nvn_stex_tile_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_tiles * TILE; pthread_mutex_unlock(&g_mu); return b; }
 uint64_t nvn_stex_heap_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = (uint64_t)g_nheaps * HEAP_PAGES * TILE; pthread_mutex_unlock(&g_mu); return b; }
 
-// A heap page for one tile (→ heap << 16 | page, -1 when no heap can be had): the page already holding key's memory if there is one (key 0: a page of its own)
-static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key) {
+// A heap page for one tile (→ heap << 16 | page, -1 when no heap can be had): the page already holding key's memory if there is one (key 0: a page of its own);
+// *alone: 1 when the page is new to this tile (its content undefined)
+static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, int *alone) {
     pthread_mutex_lock(&g_mu);
     void *sh = key ? nvn_hm_get(&g_shared, &key) : NULL;
-    if (sh) { int p = (int)((intptr_t)sh - 1); g_heaps[p >> 16]->ref[p & 0xffff]++; g_tiles++; pthread_mutex_unlock(&g_mu); return p; }
+    if (sh) { int p = (int)((intptr_t)sh - 1); g_heaps[p >> 16]->ref[p & 0xffff]++; g_tiles++; pthread_mutex_unlock(&g_mu); *alone = 0; return p; }
     int p = -1; id<MTLHeap> fresh = nil;
     for (unsigned i = 0; i < g_nheaps && p < 0; i++) if (g_heaps[i]->nfree) p = (int)(i << 16 | g_heaps[i]->free[--g_heaps[i]->nfree]);
     if (p < 0) {
@@ -121,7 +127,7 @@ static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key) {
     g_pages++; g_tiles++;
     pthread_mutex_unlock(&g_mu);
     if (fresh && h && h->resident) h->resident(h->ctx, fresh);
-    return p;
+    *alone = 1; return p;
 }
 static void page_free(int p) {   // one tile less on the page; the last one frees it
     pthread_mutex_lock(&g_mu); sheap *hp = g_heaps[p >> 16]; unsigned i = (unsigned)(p & 0xffff);
@@ -169,25 +175,26 @@ static void tail_tile(const nvn_stex *s, unsigned j, unsigned *lv, MTLRegion *r)
     }
     *lv = s->mtail; *r = MTLRegionMake3D(j, 0, 0, 1, 1, 1);
 }
-// Maps (map = 1) or unmaps an entry's Metal tiles; -1 when no heap page can be had (nothing of the entry stays mapped then). key: the share key of a tile's memory (page_alloc)
+// Maps (map = 1) or unmaps an entry's Metal tiles: → 1 when a page of its own came with it (its content undefined), 0 when it shares a page already holding its memory
+// (or on an unmap), -1 when no heap page can be had (nothing of the entry stays mapped then). key: the share key of a tile's memory (page_alloc)
 static int ent_map(nvn_stex *s, oplist *o, id<MTLDevice> dev, const nvn_stex_host *h, unsigned z, unsigned k, int map, uint64_t key) {
     ent *e = &s->e[(size_t)z * s->per_slice + k];
     uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, k, &a, &n, &lv, &x, &y);
     if (lv < s->tiled) {
         if (!map) { op_add(o, 0, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, 0); page_free(e->page); e->page = -1; e->key = 0; return 0; }
-        int p = page_alloc(dev, h, key); if (p < 0) return -1;
-        op_add(o, 1, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, p); e->page = p; e->key = key; return 0;
+        int alone, p = page_alloc(dev, h, key, &alone); if (p < 0) return -1;
+        op_add(o, 1, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, p); e->page = p; e->key = key; return alone;
     }
     int32_t *pg = s->tailpg + (size_t)z * s->tail_tiles;
     for (unsigned j = 0; j < s->tail_tiles; j++) {
         unsigned tl; MTLRegion r; tail_tile(s, j, &tl, &r);
         if (!map) { op_add(o, 0, r, tl, z, 0); page_free(pg[j]); continue; }
-        int p = page_alloc(dev, h, 0);
+        int alone, p = page_alloc(dev, h, 0, &alone); (void)alone;   // a mip tail's pages are its own
         if (p < 0) { while (j--) { tail_tile(s, j, &tl, &r); op_add(o, 0, r, tl, z, 0); page_free(pg[j]); } return -1; }
         op_add(o, 1, r, tl, z, p); pg[j] = p;
     }
     e->page = map ? 0 : -1;
-    return 0;
+    return map;
 }
 
 // One upload of entry lv / (x, y): the region of level l it fills and the linear bytes it is deswizzled into (the whole tile, or the whole level of a tail)
@@ -214,12 +221,13 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
         int m = 0; for (uint64_t p = 0; p < n && !m; p += TILE) m = g->mapped(g->ctx, g->base + a + p, MIN((uint64_t)TILE, n - p));
         if (!m) { if (e->page >= 0) ent_map(s, &o, t.device, h, z, k, 0, 0); e->dirty = 0; continue; }
         // A tile's share key, asked for only when it is mapped anew or its pages changed (a new mapping in its range is a change): a tile whose memory moved
-        // leaves the page it shared. A tile mapped anew is always uploaded, so the page holds the memory as it is now, whoever uploaded it before
-        #define KEY() (s->share && lv < s->tiled && g->backing ? share_key(g->backing(g->ctx, g->base + a), s->pf) : 0)
-        if (e->page < 0) { if (ent_map(s, &o, t.device, h, z, k, 1, KEY())) fail = 1; else e->dirty = 1; }
+        // leaves the page it shared. A tile mapped anew is uploaded, so the page holds the memory as it is now, whoever uploaded it before; a GPU-written
+        // texture's tile is not (its memory is the page's), a page of its own is zeroed
+        #define KEY() (s->share && lv < s->tiled && g->backing ? share_key(g->backing(g->ctx, g->base + a), s->pf, s->gpu) : 0)
+        if (e->page < 0) { int r = ent_map(s, &o, t.device, h, z, k, 1, KEY()); if (r < 0) fail = 1; else e->dirty = s->gpu ? (uint8_t)r : 1; }
         else if (g->changed(g->ctx, g->base + a, n)) {
-            e->dirty = 1; uint64_t key = KEY();
-            if (key != e->key) { ent_map(s, &o, t.device, h, z, k, 0, 0); if (ent_map(s, &o, t.device, h, z, k, 1, key)) { fail = 1; e->dirty = 0; } }
+            uint64_t key = KEY(); if (!s->gpu) e->dirty = 1;
+            if (key != e->key) { ent_map(s, &o, t.device, h, z, k, 0, 0); int r = ent_map(s, &o, t.device, h, z, k, 1, key); if (r < 0) { fail = 1; e->dirty = 0; } else e->dirty = s->gpu ? (uint8_t)r : 1; }
         }
         #undef KEY
     }
@@ -241,12 +249,12 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
     for (size_t i = 0; i < last; i++) {
         ent *e = &s->e[i]; if (!e->dirty) continue;
         unsigned z = (unsigned)(i / s->per_slice); uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, (unsigned)(i % s->per_slice), &a, &n, &lv, &x, &y);
-        if (n > tmp_n) { free(tmp); tmp = malloc(n); tmp_n = n; }
-        g->copy(g->ctx, tmp, g->base + a, n);
+        if (!s->gpu) { if (n > tmp_n) { free(tmp); tmp = malloc(n); tmp_n = n; } g->copy(g->ctx, tmp, g->base + a, n); }
         for (unsigned l = lv; l < (lv < s->tiled ? lv + 1 : s->levels); l++) {   // a tile, or every level of the mip tail
             cp c = {at, 0, 0, {0}, {0}, z, l}; up_geom(s, lv, x, y, l, &c.o, &c.sz, &c.pitch, &c.bytes);
             uint8_t *dst = (uint8_t *)stg.contents + at;
-            if (lv < s->tiled ? nvn_deswizzle(&s->tile, 0, 0, tmp, dst, c.pitch) : nvn_deswizzle_part(&s->d, l, z, tmp, a, n, dst, c.pitch)) { fail = 1; continue; }
+            if (s->gpu) memset(dst, 0, c.bytes);
+            else if (lv < s->tiled ? nvn_deswizzle(&s->tile, 0, 0, tmp, dst, c.pitch) : nvn_deswizzle_part(&s->d, l, z, tmp, a, n, dst, c.pitch)) { fail = 1; continue; }
             cps[ncp++] = c; at += (c.bytes + 255) & ~(size_t)255;
         }
         e->dirty = 0;
@@ -262,11 +270,17 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
     return fail && !bytes ? -1 : (int64_t)bytes;
 }
 
+id<MTLTexture> nvn_stex_take(nvn_stex *s) {
+    if (!s || !s->owned) return nil;
+    s->owned = 0; return (__bridge_transfer id<MTLTexture>)s->tex;   // s->tex stays as an unretained pointer for its syncs
+}
 void nvn_stex_free(nvn_stex *s, id<MTL4CommandQueue> q) {
     if (!s) return;
-    id<MTLTexture> t = (__bridge_transfer id<MTLTexture>)s->tex; oplist o = {0};
+    oplist o = {0};
+    if (!s->owned) q = nil;   // its texture is going away (nvn_stex_take): its mappings go with it, its pages only return to the heaps
+    id<MTLTexture> t = s->owned ? (__bridge_transfer id<MTLTexture>)s->tex : nil;
     for (unsigned z = 0; z < s->slices; z++) for (unsigned k = 0; k < s->per_slice; k++)
-        if (s->e[(size_t)z * s->per_slice + k].page >= 0) ent_map(s, &o, t.device, NULL, z, k, 0, 0);
+        if (s->e[(size_t)z * s->per_slice + k].page >= 0) ent_map(s, &o, nil, NULL, z, k, 0, 0);
     if (q) ops_apply(q, t, &o);
     free(o.v); free(s->e); free(s->tailpg); free(s);
 }

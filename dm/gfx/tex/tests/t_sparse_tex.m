@@ -64,7 +64,7 @@ static void s1(int s2) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor new]; td.textureType = MTLTextureType2DArray; td.pixelFormat = MTLPixelFormatRGBA8Unorm;
     td.width = 1024; td.height = 600; td.arrayLength = 3; td.mipmapLevelCount = 11; td.usage = MTLTextureUsageShaderRead;
     CHECK(nvn_stex_wanted(dev, &d, td.pixelFormat, 0), "S1 RGBA8 sparse array not taken");
-    nvn_stex *s = nvn_stex_new(dev, td, &d); CHECK(s != NULL, "S1 nvn_stex_new failed"); if (!s) return;
+    nvn_stex *s = nvn_stex_new(dev, td, &d, 0); CHECK(s != NULL, "S1 nvn_stex_new failed"); if (!s) return;
     id<MTLResidencySet> rs = [dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
     host h = {[dev newBufferWithLength:64 << 20 options:MTLResourceStorageModeShared], 0, rs};
     [rs addAllocation:h.b]; [rs addAllocation:nvn_stex_texture(s)]; [rs commit]; [q addResidencySet:rs];
@@ -109,7 +109,7 @@ static void s2(void) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor new]; td.textureType = MTLTextureType2DArray; td.pixelFormat = MTLPixelFormatASTC_8x8_sRGB;
     td.width = 8192; td.height = 8192; td.arrayLength = 68; td.mipmapLevelCount = 12; td.usage = MTLTextureUsageShaderRead;
     size_t a0 = dev.currentAllocatedSize;
-    nvn_stex *s = nvn_stex_new(dev, td, &d); CHECK(s != NULL, "S2 8192×8192×68 ASTC 8×8 not created"); if (!s) return;
+    nvn_stex *s = nvn_stex_new(dev, td, &d, 0); CHECK(s != NULL, "S2 8192×8192×68 ASTC 8×8 not created"); if (!s) return;
     size_t a1 = dev.currentAllocatedSize;
     // map 16 tiles of layer 5 level 0 and layer 5's mip tail; the guest data is 0 (the content is S1's business)
     guest g = {NULL, L.size, calloc(L.size >> 16, 1), calloc(L.size >> 16, 1)};
@@ -150,7 +150,7 @@ static void s3(void) {
     for (uint64_t p = 1; p < Lb.size >> 16; p++) gb.phys[p] = (0x1000 + p) << 16;
     MTLTextureDescriptor *tda = [MTLTextureDescriptor new]; tda.textureType = MTLTextureType2DArray; tda.pixelFormat = MTLPixelFormatASTC_8x8_sRGB; tda.width = 4096; tda.height = 2560; tda.arrayLength = 2; tda.usage = MTLTextureUsageShaderRead;
     MTLTextureDescriptor *tdb = [MTLTextureDescriptor new]; tdb.textureType = MTLTextureType2D; tdb.pixelFormat = MTLPixelFormatASTC_8x8_sRGB; tdb.width = 1024; tdb.height = 1024; tdb.usage = MTLTextureUsageShaderRead;
-    nvn_stex *a = nvn_stex_new(dev, tda, &da), *b = nvn_stex_new(dev, tdb, &db); CHECK(a && b, "S3 sparse textures not created"); if (!a || !b) return;
+    nvn_stex *a = nvn_stex_new(dev, tda, &da, 0), *b = nvn_stex_new(dev, tdb, &db, 0); CHECK(a && b, "S3 sparse textures not created"); if (!a || !b) return;
     id<MTLResidencySet> rs = [dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
     host h = {[dev newBufferWithLength:16 << 20 options:MTLResourceStorageModeShared], 0, rs};
     [rs addAllocation:h.b]; [rs addAllocation:nvn_stex_texture(a)]; [rs addAllocation:nvn_stex_texture(b)]; [rs commit]; [q addResidencySet:rs];
@@ -194,12 +194,52 @@ static void s3(void) {
     guest gc = {calloc(1, Lc.size), Lc.size, malloc(Lc.size >> 16), calloc(Lc.size >> 16, 1), calloc(Lc.size >> 16, 8)};
     memset(gc.map, 1, Lc.size >> 16); for (uint64_t p = 0; p < Lc.size >> 16; p++) gc.phys[p] = 0x10000;
     MTLTextureDescriptor *tdc = [MTLTextureDescriptor new]; tdc.pixelFormat = MTLPixelFormatRGBA8Unorm; tdc.width = 256; tdc.height = 256; tdc.usage = MTLTextureUsageShaderRead;
-    nvn_stex *c = nvn_stex_new(dev, tdc, &dc); CHECK(c != NULL, "S3 RGBA8 sparse texture not created");
+    nvn_stex *c = nvn_stex_new(dev, tdc, &dc, 0); CHECK(c != NULL, "S3 RGBA8 sparse texture not created");
     if (c) { [rs addAllocation:nvn_stex_texture(c)]; [rs commit]; nvn_stex_guest ggc = {&gc, 0, g_mapped, g_changed, g_copy, g_backing}; sync_in(c, &ggc, &hh); h.used = 0;
         CHECK(nvn_stex_mapped_bytes() - p0 == Lc.size, "S3 RGBA8 tiles shared a page (%llu pages for %llu tiles)", (unsigned long long)((nvn_stex_mapped_bytes() - p0) >> 16), (unsigned long long)(Lc.size >> 16));
         nvn_stex_free(c, q); }
     free(ref); free(ga.mem); free(ga.map); free(ga.wr); free(ga.phys); free(gb.mem); free(gb.map); free(gb.wr); free(gb.phys); free(gc.mem); free(gc.map); free(gc.wr); free(gc.phys);
     printf("  S3 ASTC 8x8: %llu tiles on %llu heap pages, shared tiles read the same blocks in one texture and across two, a moved tile gets a page of its own; RGBA8 tiles keep their own pages\n", (unsigned long long)tiles, (unsigned long long)(tiles - 2));
+}
+
+static void s4(void) {
+    uint64_t p0 = nvn_stex_mapped_bytes(), t0 = nvn_stex_tile_bytes();
+    // A and B: GPU-written R8 1024x1024 (COMPRESSIBLE | SPARSE; 4x4 tiles of 256x256), rendered into, every 64 KB mapped; A tile 0 and B tile 0 have one physical memory
+    nvn_texdesc d = {1, 0x1, 0x28, 0, 1024, 1024, 1, 1, 0, 0}; nvn_texlayout L; nvn_tex_layout(&d, &L); uint64_t np = L.size >> 16;
+    guest ga = {NULL, L.size, malloc(np), calloc(np, 1), calloc(np, 8)}, gb = {NULL, L.size, malloc(np), calloc(np, 1), calloc(np, 8)};
+    memset(ga.map, 1, np); memset(gb.map, 1, np);
+    for (uint64_t p = 0; p < np; p++) { ga.phys[p] = (0x100 + p) << 16; gb.phys[p] = (0x200 + p) << 16; }
+    gb.phys[0] = ga.phys[0];
+    MTLTextureDescriptor *td = [MTLTextureDescriptor new]; td.pixelFormat = MTLPixelFormatR8Unorm; td.width = 1024; td.height = 1024; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    nvn_stex *a = nvn_stex_new(dev, td, &d, 1), *b = nvn_stex_new(dev, td, &d, 1); CHECK(a && b, "S4 GPU-written sparse textures not created"); if (!a || !b) return;
+    id<MTLTexture> ta = nvn_stex_take(a), tb = nvn_stex_take(b);   // the caller's references, as the host's sharing table keeps them
+    id<MTLResidencySet> rs = [dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
+    host h = {[dev newBufferWithLength:4 << 20 options:MTLResourceStorageModeShared], 0, rs};
+    [rs addAllocation:h.b]; [rs addAllocation:ta]; [rs addAllocation:tb]; [rs commit]; [q addResidencySet:rs];
+    nvn_stex_guest gga = {&ga, 0, g_mapped, g_changed, NULL, g_backing}, ggb = {&gb, 0, g_mapped, g_changed, NULL, g_backing}; nvn_stex_host hh = {&h, h_stage, h_encoder, h_resident};
+    // the GPU writes A everywhere (a buffer copy stands for a render pass): every tile 0x5a
+    id<MTLBuffer> src = [dev newBufferWithLength:1024 * 1024 options:MTLResourceStorageModeShared]; memset(src.contents, 0x5a, 1024 * 1024); [rs addAllocation:src]; [rs commit];
+    sync_in(a, &gga, &hh); h.used = 0;
+    run(^(id<MTL4ComputeCommandEncoder> ce) { [ce copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:1024 sourceBytesPerImage:1024 * 1024 sourceSize:MTLSizeMake(1024, 1024, 1) toTexture:ta destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; });
+    int64_t up = sync_in(b, &ggb, &hh); h.used = 0;
+    CHECK(nvn_stex_tile_bytes() - t0 == 2 * L.size && nvn_stex_mapped_bytes() - p0 == 2 * L.size - 0x10000, "S4 %llu tiles on %llu pages, expected %llu on %llu", (unsigned long long)((nvn_stex_tile_bytes() - t0) >> 16), (unsigned long long)((nvn_stex_mapped_bytes() - p0) >> 16), (unsigned long long)(2 * np), (unsigned long long)(2 * np - 1));
+    CHECK(up == (int64_t)(L.size - 0x10000), "S4 B zeroed %lld bytes, expected its %llu tiles of its own", (long long)up, (unsigned long long)(np - 1));
+    uint8_t *rb = readback(tb, rs, 0, 0, 1024, 1024, 1024); int sh = 1, zero = 1;
+    for (uint32_t y = 0; y < 1024; y++) for (uint32_t x = 0; x < 1024; x++) { uint8_t v = rb[(size_t)y * 1024 + x]; if (x < 256 && y < 256) sh &= v == 0x5a; else zero &= v == 0; }
+    CHECK(sh, "S4 B's tile 0 does not read what the GPU wrote through A's tile 0, the memory they share");
+    CHECK(zero, "S4 B's tiles of their own do not start as zeros");
+    free(rb);
+    // A's tile 1 is unmapped (its page back to the heaps, holding 0x5a) and mapped again on other memory: it starts as zeros, not as the old page's content
+    ga.map[1] = 0; sync_in(a, &gga, &hh); h.used = 0; ga.map[1] = 1; ga.phys[1] = 0x300ull << 16; ga.wr[1] = 1; sync_in(a, &gga, &hh); h.used = 0; ga.wr[1] = 0;
+    uint8_t *ra = readback(ta, rs, 0, 0, 1024, 1024, 1024); zero = 1; int keep = 1;
+    for (uint32_t y = 0; y < 256; y++) for (uint32_t x = 0; x < 512; x++) { uint8_t v = ra[(size_t)y * 1024 + x]; if (x >= 256) zero &= v == 0; else keep &= v == 0x5a; }
+    CHECK(zero && keep, "S4 A's remapped tile does not start as zeros, or its tile 0 lost what the GPU wrote");
+    free(ra);
+    [rs removeAllocation:ta]; [rs removeAllocation:tb]; [rs commit]; ta = nil; tb = nil;   // the textures go: their pages only go back to the heaps
+    nvn_stex_free(a, q); nvn_stex_free(b, q);
+    CHECK(nvn_stex_mapped_bytes() == p0 && nvn_stex_tile_bytes() == t0, "S4 pages or tiles left after free");
+    free(ga.map); free(ga.wr); free(ga.phys); free(gb.map); free(gb.wr); free(gb.phys);
+    printf("  S4 GPU-written R8: a tile shared by its physical memory reads what the GPU wrote through the other texture, pages of their own start as zeros\n");
 }
 
 int main(void) {
@@ -209,6 +249,7 @@ int main(void) {
         printf("S1 sparse 2D array: tiles mapped where the guest maps memory\n"); s1(0); s1(1);
         printf("S2 Mario Kart World's virtual texture shape\n"); s2();
         printf("S3 tiles with one memory behind them share a heap page\n"); s3();
+        printf("S4 GPU-written sparse textures\n"); s4();
         printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
         return fails ? 1 : 0;
     }

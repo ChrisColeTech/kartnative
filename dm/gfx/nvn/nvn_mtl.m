@@ -845,6 +845,7 @@ static uint64_t g_sub_serial;   // Submission index (used by the parallel precom
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
+static void gstex_sync_all(void), gstex_drop_pool(const void *pool);   // GPU-written sparse textures (gstex_new)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
     defer_drain();
@@ -881,6 +882,7 @@ void mtl_sub_begin(void) {
     g_vis = g_vis_ring[pick].buf;
     void pg_sub_begin_ext(uint64_t fence); pg_sub_begin_ext(g_fence + 1);
     void arena_begin(void); arena_begin();
+    gstex_sync_all();   // GPU-written sparse textures follow the mappings made since the last submission
 }
 
 static void rp_end(void);
@@ -1666,7 +1668,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[145];
+static int g_red_once[146];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -1766,6 +1768,7 @@ void mtl_alias_drop_pool(const void *pool) {
     pthread_mutex_unlock(&g_smu);
     free(ks);
     cpu_tex_drop_pool(pool);
+    gstex_drop_pool(pool);
     treg_drop_pool_views(pool);   // outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
 }
 // A new shared texture takes over storage: entries of the same pool whose storage overlaps the new texture's under another description go, unless a live texture object still resolves
@@ -2001,6 +2004,8 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     if (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) d.usage |= MTLTextureUsagePixelFormatView;
     return d;
 }
+static char g_gstex_key;   // a GPU-written sparse texture's owner, an associated object (gstex_new)
+static int gstex_of(id<MTLTexture> t) { return t && objc_getAssociatedObject(t, &g_gstex_key) != nil; }
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
@@ -2008,6 +2013,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
     {   // A texture on a placement-sparse backing (stex_sync) keeps it: an ordinary copy would be its whole size (5.8 GB for MKW's BC6H arrays) and lose the tile mapping
         id holder = tex_get(t->serial);
         if ([holder isKindOfClass:[NvPkg class]] && ((NvPkg *)holder)->stex) { RED_ONCE(141, "sparse-backed texture ser=%llu needs usage %#lx / a format view %lu it was not made with: not upgraded", (unsigned long long)t->serial, (unsigned long)add, (unsigned long)view_pf); return base; }
+        if (gstex_of(base)) { RED_ONCE(141, "sparse-backed texture ser=%llu needs usage %#lx / a format view %lu it was not made with: not upgraded", (unsigned long long)t->serial, (unsigned long)add, (unsigned long)view_pf); return base; }   // a GPU-written one (gstex_new)
     }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = base.textureType; d.pixelFormat = base.pixelFormat; d.width = base.width; d.height = base.height; d.depth = base.depth;   // Keep the original format, only add the format-view usage
@@ -2281,7 +2287,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
 static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_dispatches;
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
-int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);
+int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_pool_gen(const void *pool); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
 // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; keep: usage the texture it replaces was upgraded to (tex_upgrade), which the new one
 // is made with: a texture drawn into and re-uploaded (a CPU write into one the game renders into) was made without render-target use again and upgraded at its next attachment, a
@@ -2683,6 +2689,53 @@ static void stex_sync(NvPkg *pk, const tex_t *t, int all) {
     if (!g_cb) up_flush();
     pk->stamp = st; pk->vgen = pk->vseen = vg;
 }
+// GPU-written textures of sparse pools (render targets with flag SPARSE: MKW's 16384x16384 R8 and 8192x8192 RG16 / R16 terrain textures, 3.1 GB as whole Metal textures,
+// of whose storage the game maps 8-26 MB each) are placement-sparse textures too, whose tiles follow the guest's mappings with no upload: a tile's page is the memory the
+// GPU writes, shared by every tile of one physical memory (nvn_stex_new gpu), unmapped tiles drop writes and read 0, as on the GPU. The sharing table keeps the texture;
+// its owner, an associated object, gives the pages back when it goes. The tiles follow the mappings at the start of each submission whose pool's mappings changed
+@interface NvGpuStex : NSObject { @public nvn_stex *s; const void *pool; uint64_t mem, vgen; } @end
+static NvGpuStex *__unsafe_unretained *g_gstex; static int g_ngstex, g_cgstex;
+static pthread_mutex_t g_gstex_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;   // recursive: an owner's dealloc (its texture's last release) may come while a sync holds it
+@implementation NvGpuStex
+- (void)dealloc { pthread_mutex_lock(&g_gstex_mu); for (int i = 0; i < g_ngstex; i++) if (g_gstex[i] == self) { g_gstex[i] = g_gstex[--g_ngstex]; break; } pthread_mutex_unlock(&g_gstex_mu); nvn_stex_free(s, nil); }
+@end
+static void gstex_sync(NvGpuStex *o) {   // submit thread
+    uint64_t vg = nvn_sparse_pool_gen(o->pool);
+    up_begin();
+    stex_gctx gc = {o->pool, o->vgen, nvn_dirty_now(), 0};
+    nvn_stex_guest g = {&gc, o->mem, stex_mapped, stex_changed, NULL, stex_backing};
+    nvn_stex_host h = {NULL, stex_stage, stex_encoder, stex_resident};
+    int64_t n = nvn_stex_sync(o->s, g_q4, &g, &h, 0);
+    if (n < 0) RED_ONCE(145, "GPU-written sparse texture sync failed (no tile heap or staging): its tiles stay as they were");
+    if (!g_cb) up_flush();
+    o->vgen = vg;
+}
+static void gstex_sync_all(void) {   // mtl_sub_begin: the textures whose pool's mappings changed since their last sync
+    pthread_mutex_lock(&g_gstex_mu);
+    for (int i = 0; i < g_ngstex; i++) { NvGpuStex *o = g_gstex[i]; if (o->pool && nvn_sparse_pool_gen(o->pool) != o->vgen) gstex_sync(o); }
+    pthread_mutex_unlock(&g_gstex_mu);
+}
+static void gstex_drop_pool(const void *pool) {   // the pool is finalized: its textures no longer follow it
+    pthread_mutex_lock(&g_gstex_mu); for (int i = 0; i < g_ngstex; i++) if (g_gstex[i]->pool == pool) g_gstex[i]->pool = NULL; pthread_mutex_unlock(&g_gstex_mu);
+}
+static id<MTLTexture> gstex_new(const tex_t *t) {
+    if (!DM_GAME_SWITCH2 || !t->mem || !t->pool || !nvn_sparse_pool(t->pool) || !(t->d.flags & NVN_TEXTURE_FLAGS_SPARSE)) return nil;   // Switch 2 only for now: Switch 1 games keep their tested path
+    MTLTextureDescriptor *md = tex_desc(t, 0);
+    if (md) md.usage |= MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget;   // tex_upgrade cannot replace it (a copy would be its whole size); without lossless compression this usage costs nothing
+    if (!md || !nvn_stex_wanted(g_dev, &t->d, md.pixelFormat, STEX_MIN_BYTES)) return nil;
+    nvn_stex *s = nvn_stex_new(g_dev, md, &t->d, 1); if (!s) return nil;
+    id<MTLTexture> mt = nvn_stex_take(s);
+    NvGpuStex *o = [NvGpuStex new]; o->s = s; o->pool = t->pool; o->mem = (uint64_t)(uintptr_t)t->mem; o->vgen = ~0ull;
+    objc_setAssociatedObject(mt, &g_gstex_key, o, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    res_add(mt);
+    pthread_mutex_lock(&g_gstex_mu);
+    if (g_ngstex == g_cgstex) g_gstex = (NvGpuStex *__unsafe_unretained *)realloc(g_gstex, (size_t)(g_cgstex = g_cgstex ? 2 * g_cgstex : 16) * sizeof *g_gstex);
+    g_gstex[g_ngstex++] = o;
+    if (on_sub_thread()) gstex_sync(o);   // otherwise at the next submission's start
+    pthread_mutex_unlock(&g_gstex_mu);
+    static int nl; if (nl++ < 16) MLOG("GPU-written sparse texture ser=%llu %ux%ux%u format %#x levels %u: placement-sparse, tiles where the game maps memory (%llu MB of storage)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.levels, (unsigned long long)(t->L.size >> 20));
+    return mt;
+}
 static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 // Distinct compressible image descriptions at one NVN address alias physical memory, even while all their descriptor objects are live (LM3's resolution families).
 // Single-description storage keeps the ordinary allocation. Families share an exact-sized placement heap, found through the existing alias table rather than a pool-lifetime owner.
@@ -2797,7 +2850,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (DM_GAME_SWITCH2 && pk->sparse && (md = tex_desc(t, 1)) && nvn_stex_wanted(g_dev, &t->d, md.pixelFormat, STEX_MIN_BYTES)) {   // Switch 2 only for now: Switch 1 games keep their tested path
             // made with the usage tex_upgrade would add, as it cannot replace this texture: MKW renders into its 6144x6144x2 RGBA8 sparse array through an sRGB view (ser 31488)
             md.usage |= MTLTextureUsagePixelFormatView | (fmt_compressed(t->d.format) ? 0 : MTLTextureUsageRenderTarget);
-            pk->stex = nvn_stex_new(g_dev, md, &t->d);
+            pk->stex = nvn_stex_new(g_dev, md, &t->d, 0);
         }
         if (pk->stex) {
             pk->tex = nvn_stex_texture(pk->stex); res_add(pk->tex);
@@ -2852,6 +2905,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         tex_put(t->serial, shared); return shared;
     }
     id<MTLTexture> mt = tex_linear(t);
+    if (!mt) mt = gstex_new(t);   // a GPU-written texture of a sparse pool: tiles only where the game maps memory
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
