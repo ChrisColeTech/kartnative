@@ -930,12 +930,12 @@ What the host does with the command-buffer entries NVN2 adds or changes (`dm/gfx
 - **Fix:** nothing is recorded: the replay runs every recording in order on one Metal queue, an order at least as strict, and the host's handles stay record pointers (NVN2 tag 0) in every mode.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (17 call sites, modes 0, 1 and 2).
 
-### Mesh-shader draws recorded, not drawn
+### Mesh-shader draws
 
 - **Symptom:** `[RED] NVN2 mesh-shader draw (DrawMeshTasks family, kind 0) skipped: the replay has no mesh path yet (n skipped so far)`; whatever those draws make (MKW's are task / mesh programs) is missing.
-- **Cause:** the replay has no task / mesh pipeline: the translator does not yet translate MKW's 7 task and 18 mesh programs, and Metal's mesh pipelines (object and mesh functions) are a pipeline kind of their own.
-- **Fix (partial):** every `DrawMeshTasks*` form is recorded with its arguments (`OP_MESH`; a direct draw's record stops before the indirect fields) and the capture walk covers its indirect records, so a mesh path (translated task / mesh programs and a Metal mesh pipeline in the replay) needs no change to the recording. `SetGeometryProcessingMode`, with which MKW brackets each mesh draw (1 or 2 before, 0 after), is not recorded: the pipeline follows from the program a draw binds.
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (9 call sites, `first` 0, `count` = items / 32; a headless run skipped more than 512 of them in its first 212 frames).
+- **Cause:** the replay had no task / mesh pipeline.
+- **Fix:** every `DrawMeshTasks*` form is recorded with its arguments (`OP_MESH`; a direct draw's record stops before the indirect fields). The translator runs task / mesh programs as kernels with ISBE regions in shared memory, and `dmsh_mesh.py` wraps them as Metal object / mesh functions ([shaders-sm86.md](shaders-sm86.md#task-and-mesh-programs)). `nvn2_mesh.inc` replays each `OP_MESH` form as `drawMeshThreadgroups` through `draw()` as a synthetic draw: the pipeline is built in the background, the task / mesh arguments are NVN stages 6 / 7 (the `S.*` bind arrays have 8 stages, their `c0` storage tables at `DMSH_C0_SSBO_TS` / `_MS`; the object table, and the vertex table for the mesh stage), and `{first}` sits in slot 12. Indirect records are read on the CPU after a wait. 3-D grids are drawn linearly (`[RED]` once). `DM_NVN_MESH=0` skips them as a diagnostic. `SetGeometryProcessingMode`, with which MKW brackets each mesh draw (1 or 2 before, 0 after), is not recorded: the pipeline follows from the program a draw binds.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (9 call sites, `first` 0, `count` = items / 32; a first run drew 131,072+ mesh draws in 150 s, 11 of its 12 pipelines built).
 
 ### Variable-rate shading at the full rate
 
