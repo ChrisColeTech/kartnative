@@ -4,7 +4,7 @@
 //         virtual = address space size (reserved-only counts too), resident = pages_resident, charged = dirty pages + compressed/swapped-out pages, deduplicated by VM object (≈ the part that goes into phys_footprint)
 //         dedup key = (object id, offset within the object); reason for dedup: Metal wraps the guest memory pool with "no copy", so the same object is mapped in several places (share_mode TRUESHARED, ref_count>1), and summing region by region would double count;
 // measured on Mac, after per-object dedup Σcharged is 2,139 MiB against phys_footprint 2,111 MiB (+1.3%)
-//   Classes: guest (the whole guest address space block, including the SetHeapSize heap, alias, stacks; data read from RomFS through pread also lands here), code (embedded / loaded module images),
+//   Classes: guest (the whole guest address space block but the heap: alias, stacks; data read from RomFS through pread also lands here), guest heap (the span SetHeapSize opened), code (embedded / loaded module images),
 //         malloc (host heap), gpu (IOAccelerator / IOSurface / Metal tagged regions), stack, file (file mappings), other
 //   The part where charged ≠ phys_footprint (GPU private memory accounted by IOKit is not in any VM region) is listed separately as "unattributed" = footprint − Σcharged.
 #import <Foundation/Foundation.h>
@@ -18,11 +18,13 @@
 #include "dm.h"
 
 void svc_guest_range(uint8_t **base, size_t *size);
-enum { C_GUEST, C_CODE, C_MALLOC, C_GPU, C_STACK, C_FILE, C_OTHER, NC };
-static const char *k_cls[NC] = {"guest", "code", "malloc", "gpu", "stack", "file", "other"};
+void dm_guest_heap_range(uint64_t *base, size_t *open_len);
+enum { C_GUEST, C_HEAP, C_CODE, C_MALLOC, C_GPU, C_STACK, C_FILE, C_OTHER, NC };
+static const char *k_cls[NC] = {"guest", "guest heap", "code", "malloc", "gpu", "stack", "file", "other"};
 
 static int classify(vm_address_t a, const vm_region_submap_info_data_64_t *in) {
-    uint8_t *gb; size_t gs; svc_guest_range(&gb, &gs);
+    uint8_t *gb; size_t gs; svc_guest_range(&gb, &gs); uint64_t hb; size_t hn; dm_guest_heap_range(&hb, &hn);
+    if (hn && a >= hb && a < hb + hn) return C_HEAP;
     if (gb && a >= (vm_address_t)gb && a < (vm_address_t)gb + gs) return C_GUEST;
     for (int i = 0; i < g_nmod; i++)
         if (a >= (vm_address_t)g_mod[i].base && a < (vm_address_t)g_mod[i].base + g_mod[i].size) return C_CODE;

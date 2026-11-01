@@ -2446,6 +2446,20 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
+// Diagnostic (the memory census, DM_NVN_MEMTOP): what the sparse pools map, in 4 KB pages: virtual pages with memory behind them, and the distinct physical pages behind those
+static int cmp_ptr(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
+void nvn_sparse_census(uint64_t *virt_bytes, uint64_t *phys_bytes) {
+    uintptr_t *ph = NULL; size_t n = 0, cap = 0;
+    pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; if (v->pool->vmode != 2) continue;
+        for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) if (v->pt[l]) for (unsigned i = 0; i < VPT_LEAF; i++) if (v->pt[l][i].phys) {
+            if (n == cap && !(ph = realloc(ph, (cap = cap ? 2 * cap : 65536) * sizeof *ph))) die("sparse census allocation failed");
+            ph[n++] = (uintptr_t)v->pt[l][i].phys; } }
+    pthread_mutex_unlock(&g_vp_mu);
+    qsort(ph, n, sizeof *ph, cmp_ptr);
+    size_t u = 0; for (size_t i = 0; i < n; i++) u += !i || ph[i] != ph[i - 1];
+    free(ph); *virt_bytes = (uint64_t)n << 12; *phys_bytes = (uint64_t)u << 12;
+}
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});
 }

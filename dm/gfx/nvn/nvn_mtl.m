@@ -2882,11 +2882,19 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n; uint64_t ghost_puts = g_ghost_puts;
     unsigned aorph = 0;   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes (alias_take_over)
+    // For the census line below: the textures each table holds, so the residency set's memory can be split by owner
+    CFMutableSetRef c_unref = CFSetCreateMutable(NULL, 0, NULL), c_alias = CFSetCreateMutable(NULL, 0, NULL), c_pkg = CFSetCreateMutable(NULL, 0, NULL), c_ser = CFSetCreateMutable(NULL, 0, NULL), c_ghost = CFSetCreateMutable(NULL, 0, NULL);
     { CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL);
       for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) CFSetAddValue(held, g_by_serial.vals[i]);
       for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) CFSetAddValue(held, g_ghost.vals[i]);
-      for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) aorph++;
+      for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) { aorph++; CFSetAddValue(c_unref, g_alias.vals[i]); }
       CFRelease(held); }
+    {
+        for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) CFSetAddValue(c_alias, g_alias.vals[i]);
+        for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) CFSetAddValue(c_ghost, g_ghost.vals[i]);
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) { id o = (__bridge id)g_by_serial.vals[i]; if (!o) continue;
+            if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; if (pk->tex) CFSetAddValue(c_pkg, (__bridge const void *)pk->tex); if (pk->spare) CFSetAddValue(c_pkg, (__bridge const void *)pk->spare); }
+            else if ([o conformsToProtocol:@protocol(MTLTexture)]) CFSetAddValue(c_ser, (__bridge const void *)o); } }
     pthread_mutex_unlock(&g_smu);
     unsigned long dead_n = 0; unsigned long long dead_mb = 0;
     // Objects read from a weak table come back retained + autoreleased: the frame hook runs on a guest thread with no autorelease pool that drains, so without this wrapper every buffer counted would be pinned for good (the readout creating the leak itself)
@@ -2897,6 +2905,51 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
+    @autoreleasepool {   // the residency set's allocations by owner (MB of allocatedSize; pool buffers wrap guest memory, so they are address space, not memory of their own); a few ms per line, which comes only when memory moved
+        CFMutableSetRef c_pool = CFSetCreateMutable(NULL, 0, NULL); uint64_t pool_all = 0;
+        pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) { CFSetAddValue(c_pool, (__bridge const void *)g_pools[i].buf); pool_all += g_pools[i].buf.length; } pthread_mutex_unlock(&g_mu);
+        enum { C_POOL, C_BUF, C_HEAP, C_UNREF, C_ALIAS, C_PKG, C_SER, C_GHOST, C_TEX, C_N }; uint64_t cb[C_N] = {0}; unsigned cn[C_N] = {0};
+        static const char *cname[C_N] = {"pool buffer", "buffer", "heap", "shared unreferenced", "shared", "packaged", "serial", "ghost", "texture"};
+        // DM_NVN_MEMTOP=<n>: the n largest groups of resident allocations (owner, size, format), to see what the census's classes hold
+        static int top_n = -1; if (top_n < 0) { const char *e = getenv("DM_NVN_MEMTOP"); top_n = e ? atoi(e) : 0; }
+        NSMutableDictionary<NSString *, NSMutableArray<NSNumber *> *> *grp = top_n > 0 ? [NSMutableDictionary dictionary] : nil;
+        pthread_mutex_lock(&g_res_mu);
+        for (id r in g_res_objects) { int k; const void *p = (__bridge const void *)r;
+            if ([r conformsToProtocol:@protocol(MTLBuffer)]) k = CFSetContainsValue(c_pool, p) ? C_POOL : C_BUF;
+            else if ([r conformsToProtocol:@protocol(MTLHeap)]) k = C_HEAP;
+            else k = CFSetContainsValue(c_unref, p) ? C_UNREF : CFSetContainsValue(c_alias, p) ? C_ALIAS : CFSetContainsValue(c_pkg, p) ? C_PKG : CFSetContainsValue(c_ser, p) ? C_SER : CFSetContainsValue(c_ghost, p) ? C_GHOST : C_TEX;
+            uint64_t sz = ((id<MTLAllocation>)r).allocatedSize; cn[k]++; cb[k] += sz;
+            if (grp && k != C_POOL) {
+                NSString *key; if (k == C_BUF || k == C_HEAP) key = [NSString stringWithFormat:@"%s %llu MB", cname[k], (unsigned long long)(sz >> 20)];
+                else { id<MTLTexture> t = r; key = [NSString stringWithFormat:@"%s %lux%lux%lu type %lu format %lu levels %lu usage %#lx", cname[k], (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.textureType, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, (unsigned long)t.usage]; }
+                NSMutableArray<NSNumber *> *g = grp[key]; if (!g) grp[key] = g = [NSMutableArray arrayWithObjects:@0, @0, nil];
+                g[0] = @(g[0].unsignedLongLongValue + 1); g[1] = @(g[1].unsignedLongLongValue + sz); } }
+        pthread_mutex_unlock(&g_res_mu);
+        if (grp) { NSArray<NSString *> *keys = [grp keysSortedByValueUsingComparator:^NSComparisonResult(NSArray<NSNumber *> *a, NSArray<NSNumber *> *b) { return [b[1] compare:a[1]]; }];
+            for (NSUInteger i = 0; i < keys.count && i < (NSUInteger)top_n; i++) MLOG("memory top %lu up to frame %llu: %llu MB in %llu × %s", (unsigned long)i + 1, frame, grp[keys[i]][1].unsignedLongLongValue >> 20, grp[keys[i]][0].unsignedLongLongValue, keys[i].UTF8String); }
+        if (grp) { void nvn_sparse_census(uint64_t *, uint64_t *); uint64_t sv, sp; nvn_sparse_census(&sv, &sp);
+            MLOG("memory top up to frame %llu: sparse pools map %llu MB of virtual pages onto %llu MB of distinct physical pages; their textures' tiles take %llu MB of placement heaps", frame, (unsigned long long)(sv >> 20), (unsigned long long)(sp >> 20), (unsigned long long)(nvn_stex_mapped_bytes() >> 20)); }
+        if (grp) {   // shared (GPU-written) textures of sparse pools: how much of their storage the game maps, against the whole Metal texture each takes
+            pthread_mutex_lock(&g_smu); unsigned nl = 0;
+            for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) {
+                alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k); const pool_t *pl = (const pool_t *)(uintptr_t)k.pool;
+                if (!pl || !nvn_sparse_pool(pl) || nl >= 16) continue;
+                nvn_texlayout L; nvn_tex_layout(&k.d, &L); uint64_t m = 0, base = (uint64_t)(uintptr_t)pl->mem + (uint64_t)k.off;
+                for (uint64_t o = 0; o < L.size; o += 0x10000) m += nvn_sparse_mapped(pl, base + o, MIN((uint64_t)0x10000, L.size - o)) ? MIN((uint64_t)0x10000, L.size - o) : 0;
+                id<MTLTexture> t = (__bridge id)g_alias.vals[i]; nl++;
+                MLOG("memory top up to frame %llu: sparse-pool shared texture %ux%ux%u format %#x flags %#x levels %u (pool flags %#x): Metal %llu MB, storage %llu MB of which mapped %llu MB",
+                     frame, k.d.width, k.d.height, k.d.depth, k.d.format, k.d.flags, k.d.levels, pl->flags, (unsigned long long)(t.allocatedSize >> 20), (unsigned long long)(L.size >> 20), (unsigned long long)(m >> 20)); }
+            pthread_mutex_unlock(&g_smu); }
+        uint64_t ab = 0, ub = 0; unsigned an = 0;   // every shared texture, resident or not
+        pthread_mutex_lock(&g_smu); for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) { id<MTLTexture> t = (__bridge id)g_alias.vals[i]; an++; ab += t.allocatedSize; if (CFSetContainsValue(c_unref, g_alias.vals[i])) ub += t.allocatedSize; } pthread_mutex_unlock(&g_smu);
+        uint64_t dq = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) if ([d->object conformsToProtocol:@protocol(MTLResource)] && !d->keep_resident) dq += ((id<MTLResource>)d->object).allocatedSize; pthread_mutex_unlock(&g_deferred_mu);
+        uint64_t sm = nvn_stex_mapped_bytes(), sh = nvn_stex_heap_bytes();
+        MLOG("memory census up to frame %llu (MB): residency set: pool buffers %u / %llu (all pools %llu), other buffers %u / %llu, heaps %u / %llu, shared textures unreferenced %u / %llu, shared textures in use %u / %llu, packaged %u / %llu, serial textures %u / %llu, finalized (ghost) %u / %llu, other textures %u / %llu; "
+             "sharing table %u / %llu (unreferenced %llu); deferred-release queue %llu; sparse tiles mapped %llu of heaps %llu",
+             frame, cn[C_POOL], cb[C_POOL] >> 20, pool_all >> 20, cn[C_BUF], cb[C_BUF] >> 20, cn[C_HEAP], cb[C_HEAP] >> 20, cn[C_UNREF], cb[C_UNREF] >> 20, cn[C_ALIAS], cb[C_ALIAS] >> 20, cn[C_PKG], cb[C_PKG] >> 20, cn[C_SER], cb[C_SER] >> 20, cn[C_GHOST], cb[C_GHOST] >> 20, cn[C_TEX], cb[C_TEX] >> 20,
+             an, ab >> 20, ub >> 20, dq >> 20, sm >> 20, sh >> 20);
+        CFRelease(c_pool); }
+    CFRelease(c_unref); CFRelease(c_alias); CFRelease(c_pkg); CFRelease(c_ser); CFRelease(c_ghost);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "

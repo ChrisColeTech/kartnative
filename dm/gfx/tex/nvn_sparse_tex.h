@@ -40,3 +40,4 @@ int nvn_stex_pending(const nvn_stex *s);
 // Unmaps its tiles (their pages go back to the heaps) and releases it; call when the GPU no longer uses the texture
 void nvn_stex_free(nvn_stex *s, id<MTL4CommandQueue> q);
 uint64_t nvn_stex_mapped_bytes(void);   // tile memory mapped by every sparse texture (the heaps can hold more)
+uint64_t nvn_stex_heap_bytes(void);     // the placement heaps those tiles come from (heaps stay once made)

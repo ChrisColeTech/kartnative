@@ -84,6 +84,7 @@ nvn_stex *nvn_stex_new(id<MTLDevice> dev, MTLTextureDescriptor *desc, const nvn_
 id<MTLTexture> nvn_stex_texture(const nvn_stex *s) { return s ? (__bridge id<MTLTexture>)s->tex : nil; }
 int nvn_stex_pending(const nvn_stex *s) { return s && s->pending; }
 uint64_t nvn_stex_mapped_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_pages * TILE; pthread_mutex_unlock(&g_mu); return b; }
+uint64_t nvn_stex_heap_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = (uint64_t)g_nheaps * HEAP_PAGES * TILE; pthread_mutex_unlock(&g_mu); return b; }
 
 static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h) {   // → heap << 16 | page, -1
     pthread_mutex_lock(&g_mu);
