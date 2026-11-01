@@ -16,6 +16,11 @@ switch2	on
 # the title's clears of the scene colour target are recorded under SetRenderEnableConditional after a ReportCounter (Tears of the Kingdom's conditional-clear pattern): evaluated at
 # replay, as on the GPU; drawn anyway, two clears wiped the lit scene after its pass, so only the sky drawn later stayed (Nvn2Render, run pd5, frame 4000)
 render_cond	on
+# the movie player's Y (R8 2560x1440) and UV (RG8 1280x720) planes are plain textures it rewrites from the CPU (Nvn2Render, run mv1, sampled by fragment 007adfc97a0b3953):
+# without these keys they were never uploaded and the cup movie showed the last scene frozen (r11_4300..5300); with tex_flush_upload the movie's first frame shows (mv1_4800),
+# still frozen for the whole movie with tex_dirty_upload added (rt1_4300..5300 identical); the race with both keys is lit and runs at about 50 fps (rt1_8000)
+tex_flush_upload	on
+tex_dirty_upload	on
 
 # ---- Versions ----
 build	v0	1.0.0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
