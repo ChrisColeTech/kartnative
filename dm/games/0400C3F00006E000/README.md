@@ -111,6 +111,32 @@ Apple M5 Pro with 24 GB, headless, console mode, from the host's per-300-frame l
 
 With compute running, the game's threads wait more than they work. In `sample` at 80 s (16 fps, chain 0e064b18bfaa, `$W/run/MacPlay/r8_sample.txt`, `sample_busy.py` beside it) the Presentation Thread (0x1004, the NVN submit thread) was busy 54% of the time, half of it `nvn_dirty_since` ← `nvn_sparse_since` ← `tex_mtl` for each draw that binds a sparse texture (fixed by Nvn2Render, cf0344bb). In the race (`r12_sample.txt`, frame ≈6500, 18 fps) the frame is serial: the main thread spends 46% of its samples in `nvnSyncWait` at `main+0x25ec58c` (the fence of its earlier GPU work) and 41% in the job wait (`main+0x668f8`, `WaitLightEvent`); the Presentation Thread is 50% in `nvnQueueSubmitCommands` (the replay's encoding: draws, argument encoding, texture lookups, render pass starts, mesh draws) and 49% idle; the job workers are idle. Encoding (≈25 ms a frame), then the GPU (p50 11 ms), then the fence: the lever is in the replay (Nvn2Render); nothing in the host's threads or services stands out.
 
+## Variable-rate shading (wave 4)
+
+Measured with temporary record markers for the shading-rate calls, `DM_NVN_PASSDUMP`, `DM_NVN_GPUPROF` and raw dumps of the rate image (route `gp-race`, runs `$W/run/ShadingRate/sr1.log` and `sr3.log`, rate images `$W/ShadingRate/raw3/f<frame>_34222.png.raw`). The mechanism and the verdict are in [rendering.md](../../../docs/reference/rendering.md#variable-rate-shading-at-the-full-rate).
+
+- Rate tables (`ShadingRateImagePalette` index, entries 0-15; 5 = 1×1, 6 = 1×2, 8 = 2×2, 9 = 2×4, 11 = 4×4):
+  - table 0: 5 ×13, 8, 9, 11;
+  - table 1: 5 ×4, 6 ×4, 8 ×6, 9, 11;
+  - table 2: 8 ×14, 9, 11;
+  - table 3: 5 ×16;
+  - table 4: 8 ×16.
+
+  MKW switches them on before the depth prepass and the lit pass of its 2560×1440 scene and off after. Before a 1280×720 pass it sets table 0 to `5 8 8 8 11 …` five times, without an image.
+- The rate image is a 160×90 R8 texture (one texel per 16×16 tile of 2560×1440). In its 3D scenes (intro, title, race; not the menus) MKW draws it every frame in a one-draw 160×90 pass (0.8 ms). It binds the image there and unbinds it after the next two 2560×1440 passes, the lit scene passes.
+- Texel histograms, with the share of fragment work they would save for table 0 and table 1 primitives:
+
+  | Frame | Index 0 | Index 1-7 | Index 8-13 | Index 15 | Saved, table 0 | Saved, table 1 |
+  |---|---|---|---|---|---|---|
+  | 1500 (title) | 31% | 3% | 62% | 5% | 4% | 52% |
+  | 2100 (title) | 87% | 1% | 8% | 5% | 4% | 11% |
+  | 6300-7100 (race) | 47-52% | 2% | 43-48% | 1-3% | 1-3% | 36-40% |
+
+  Index 15 covers rectangles under the HUD (item box, bottom left). Index 12 covers a wedge of near road at the bottom of the screen.
+- Which table a draw uses (race frames 6400-6403, draws while a table is on): table 0 47% with the image bound, table 1 34%, table 2 15%, table 3 7%, table 4 under 1%. 1,758 vertex programs take the table index from `c[16][0x30]` per draw ([shaders-sm86.md](../../../docs/reference/shaders-sm86.md)). Without the image only table 2 and 4 draws would be coarse (entry 0 = 2×2): about 100 of the prepass's 978 draws.
+- GPU time of the passes concerned, in frames without a pass dump: the lit pair takes 1.6 ms in the title (frame 2000) and 2.0-2.1 ms in the race (frames 6000, 6400, 7000), out of 7.7-8.4 ms of render-pass time; the prepass pair takes 0.4 ms. With a pass dump the same pair takes 6-7 ms, because the GPU idles between submissions. Upper bound of the saving: about 0.5 ms weighted by draw count, at most 1.9 ms if every fragment of those passes went to 2×2. The race is CPU-bound, so the frame would not get shorter. Not prototyped.
+- Not measured headless: the share in a windowed session with the Metal HUD. The internal resolution is the same (2560×1440), so the bound holds. To check it in a window: `DM_NVN_GPUPROF=every:600` with the play script, then `dm/tools/gpuprof.py` on the log; the two 2560×1440 passes after the 160×90 pass are the ones concerned.
+
 ## Movies
 
 All 49 RomFS movies (`Movie/*.webm`, the cup openings 2560x1440 at 60 fps, e.g. `KinokoOp.webm` 1,423 frames) are VP9 WebM without an audio track. The player (`main+0x6d7000`..`+0x711600`, decoder wrapper `main+0x19e5000`..`+0x19ee000`) feeds `nn::movie::MediaExtractor` itself (`AppendMediaSourceData`) and submits its samples to the `nn::codec` VP9 decoder:

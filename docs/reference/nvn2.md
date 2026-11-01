@@ -1341,7 +1341,7 @@ Verdicts compare the driver's register use with `dm/gfx/nvn/include/nvn.h`. “n
 | BindSeparateTexture | 0x5de570 | 0 | same | As BindTexture (tokens 0xA / 0x42). |
 | BindSeparateTextures | 0x5de9c0 | 0 | same | Loop. |
 | BindSeparateTexturesDeferred | 0x5dee60 | 0 | not in nvn.h; deferred shape | Token 0x18, array read at submit. |
-| BindShadingRateImage | 0x5fe860 | 7 | new | `(cmd, const NVNtexture*, const NVNtextureView*)`; NULL texture unbinds. MKW: 7 uses, all seen with NULL, NULL. |
+| BindShadingRateImage | 0x5fe860 | 7 | new | `(cmd, const NVNtexture*, const NVNtextureView*)`; NULL texture unbinds. MKW: once a frame in its 3D scenes it binds the 160×90 R8 rate image it has just drawn (view NULL), and it unbinds it two passes later ([rendering.md](rendering.md#variable-rate-shading-at-the-full-rate)). |
 | BindStorageBuffer | 0x5dd080 | 345 | same | As BindUniformBuffer (tokens 0xE / 0x46). |
 | BindStorageBuffers | 0x5dd4d0 | 0 | same | Loop over NVNbufferRange. |
 | BindStorageBuffersDeferred | 0x5dda10 | 0 | not in nvn.h; same shape as BindUniformBuffersDeferred | Token 0x1B, array read at submit. |
@@ -1565,7 +1565,7 @@ Not in the 698-name table any more (it was in NVN1's names.txt); implemented at 
 - Deferred binds/pushes must read their array **at submit time**, not at record time.
 - `SetCommandMemoryCallbackEnabled(false)` (MKW does this) means: when command memory runs out, the driver neither calls back nor aborts. The host continues such a recording in a host-lent segment (`cmd_t.cb_off`).
 - `PushGraphicsConstants(cmd, slot, offset, size, data)` writes Ampere methods 0x504 / 0x508 (SET_ROOT_TABLE_SELECTOR / LOAD_ROOT_TABLE, header 0xA0010141); SM86 graphics programs read slot k as constant bank 24 + k. MKW's one call (main+0x16d72e8) pushes {1/W, 1/H, W, H} into slot 0, offset 0, 16 bytes, and the five MKW programs that read bank 24 read exactly bytes 0..0xC ([rendering.md](rendering.md)).
-- `SetGeometryProcessingMode` brackets mesh draws: 1 or 2 before `DrawMeshTasks`, 0 after (main+0x5d6308..0x5d647c, main+0x403d0c..0x403db0). `ShadingRateImagePalette(cmd, viewport, count, rates)`: main+0x403480..0x4034f0 sets viewports 0–4 with 16 entries in NV_shading_rate_image order (5 = 1×1); at run time MKW binds a non-NULL shading-rate image and uses rate 8 (2×2).
+- `SetGeometryProcessingMode` brackets mesh draws: 1 or 2 before `DrawMeshTasks`, 0 after (main+0x5d6308..0x5d647c, main+0x403d0c..0x403db0). `ShadingRateImagePalette(cmd, index, count, rates)`: `index` is the rate table that a primitive's `a[0x5c]` selects (Ampere `SET_VARIABLE_PIXEL_RATE_SHADING_INDEX_TO_RATE_A/B(j)`), not a viewport. main+0x403480..0x4034f0 fills tables 0-4 with 16 entries in NV_shading_rate_image order (5 = 1×1), with the values in the game note.
 
 ### Open questions
 
