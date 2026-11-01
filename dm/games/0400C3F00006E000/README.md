@@ -1,6 +1,6 @@
 # Mario Kart World
 
-Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Bring-up in progress (wave 3): headless on the Mac a scripted route goes from a new save through the title, the menus, Grand Prix, the Mushroom Cup and its opening movie to the first race (Mario Bros. Circuit: HUD, lap counter, minimap and countdown on screen) without a crash ([Route on the Mac](#route-on-the-mac-wave-3)). Every 2D screen renders right; the 3D scenes are still mostly black or unlit, the movie does not reach the window, and with the compute passes running the game makes 10-20 fps ([Measurements](#measurements-on-the-mac-wave-3)).
+Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Plays on the Mac (Apple silicon): whole Grand Prix cups at 150cc in a fullscreen window at a steady 60 fps ([Display path in fullscreen](#display-path-in-fullscreen-wave-4)), with the cup movies, terrain and water ([Terrain tiles](#terrain-tiles-wave-4)) and memory flat at about 11-12 GB resident ([Memory](#memory)); all 11,567 shaders translate ([Shaders](#shaders)). Open: some scenery objects vanish and reappear while driving; online play is not available; no iOS build.
 
 ## Build
 
