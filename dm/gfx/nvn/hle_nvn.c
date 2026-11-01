@@ -449,6 +449,14 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
     pthread_mutex_unlock(&g_fl_mu);
     return r;
 }
+// DM_NVN_TEXINFO: the storage's hash at nvnTextureInitialize, so the first resolution can tell content written since init from content already there (a ring of the last 4096)
+static struct { uint64_t serial, hash; } g_tih[4096]; static unsigned g_tih_n; static pthread_mutex_t g_tih_mu = PTHREAD_MUTEX_INITIALIZER;
+static void texinfo_init_note(uint64_t serial, uint64_t hash) { pthread_mutex_lock(&g_tih_mu); g_tih[g_tih_n++ % 4096] = (typeof(g_tih[0])){serial, hash}; pthread_mutex_unlock(&g_tih_mu); }
+int nvn_texinfo_init_hash(uint64_t serial, uint64_t *hash) {
+    int r = 0; pthread_mutex_lock(&g_tih_mu);
+    for (unsigned i = 0; i < 4096 && !r; i++) if (g_tih[i].serial == serial) { *hash = g_tih[i].hash; r = 1; }
+    pthread_mutex_unlock(&g_tih_mu); return r;
+}
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
@@ -463,9 +471,14 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     {   // DM_NVN_TEXINFO=WxH also logs every texture of that size as it is initialized (render targets included): which ones share storage, and how their descriptions differ
         static int ti = -1; static uint32_t tw, th;
         if (ti < 0) { const char *e = getenv("DM_NVN_TEXINFO"); ti = e && sscanf(e, "%ux%u", &tw, &th) == 2; }
-        if (ti && o->d.width == tw && o->d.height == th) { static uint64_t n; if (n++ < 200) LOG("[nvn] TEXINFO init ser=%llu mem=%p pool=%p(mem %p size %#llx flags %#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u size=%#llx",
+        if (ti && o->d.width == tw && o->d.height == th) {
+            uint64_t nz = 0, h = 1469598103934665603ull;
+            if (o->mem && o->pool && !(o->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) && o->L.size <= (64u << 20))
+                for (uint64_t i = 0; i < o->L.size; i++) { nz += o->mem[i] != 0; h = (h ^ o->mem[i]) * 1099511628211ull; }
+            texinfo_init_note(o->serial, h);
+            static uint64_t n; if (n++ < 200) LOG("[nvn] TEXINFO init ser=%llu mem=%p pool=%p(mem %p size %#llx flags %#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u size=%#llx non-zero at init %llu",
             (unsigned long long)o->serial, (void *)o->mem, (void *)o->pool, o->pool ? (void *)o->pool->mem : NULL, o->pool ? (unsigned long long)o->pool->size : 0ull, o->pool ? o->pool->flags : 0,
-            (unsigned long long)o->off, o->d.target, o->d.format, o->d.flags, o->d.samples, o->d.width, o->d.height, o->d.depth, o->d.levels, o->d.stride, (unsigned long long)o->L.size); }
+            (unsigned long long)o->off, o->d.target, o->d.format, o->d.flags, o->d.samples, o->d.width, o->d.height, o->d.depth, o->d.levels, o->d.stride, (unsigned long long)o->L.size, (unsigned long long)nz); }
     }
     // See SetPackagedTextureData. Linear textures are not re-uploaded as packaged: they are created on the pool buffer (tex_linear), whatever the pool's CPU access, and read what was copied in
     if (s->pkg_data && o->mem) {

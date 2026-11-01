@@ -1724,6 +1724,13 @@ static _Atomic uint64_t g_ser_gen = 1;
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } alias_key;
 static nvn_hmap g_alias = {.klen = sizeof(alias_key)};
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence + 1 at its last lookup or creation (alias_take_over spares entries looked up lately)
+// A texture object's key in the sharing table. IMAGE permits shader writes; it does not change storage. Xenoblade Chronicles 3's depth and stencil-sampling objects differ only by this
+// flag; separate Metal textures made the stencil read zero and rejected every deferred-lighting pass (actual image writes add Metal usage before opening their encoder, image_prepare).
+// An sRGB format and its linear twin read the same bytes: two objects over one storage that differ only so are one texture, the second a view of the first (alias_fmt)
+static void alias_key_of(const tex_t *t, alias_key *ak) {
+    memset(ak, 0, sizeof *ak); ak->pool = (uint64_t)(uintptr_t)t->pool; ak->off = t->off; ak->d = t->d;
+    ak->d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE; ak->d.format = alias_fmt(ak->d.format);
+}
 // Live GPU-only image descriptions, including those not used yet. A dynamic-resolution family declares its largest image before any particular resolution is used.
 // Keeping only descriptions here lets its first allocation cover that family exactly, without allocating every resolution or rounding to a power of two.
 static nvn_hmap g_image_desc = {.klen = 8};   // serial → malloc'ed tex_t, under g_smu
@@ -2787,6 +2794,24 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     }
     return mt;
 }
+// Diagnostic DM_NVN_TEXLOST=1: a texture made GPU-only at its first use although its storage, in a pool the CPU writes, holds data (counted by shape; the first few of each logged)
+static void texlost_note(const tex_t *t) {
+    if (!t->mem || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || t->d.target == NVN_TEXTURE_TARGET_BUFFER || t->d.samples > 1
+        || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE)) || t->L.size > (64u << 20)) return;
+    uint64_t nz = 0; for (uint64_t i = 0; i < t->L.size; i++) nz += t->mem[i] != 0;
+    static struct { uint32_t w, h, d, fmt, flags, levels; uint64_t n, nz_n; } sh[256]; static int nsh; static uint64_t total, total_nz;
+    int i = 0; while (i < nsh && !(sh[i].w == t->d.width && sh[i].h == t->d.height && sh[i].d == t->d.depth && sh[i].fmt == t->d.format && sh[i].flags == t->d.flags && sh[i].levels == t->d.levels)) i++;
+    if (i == nsh && nsh < 256) { sh[i].w = t->d.width; sh[i].h = t->d.height; sh[i].d = t->d.depth; sh[i].fmt = t->d.format; sh[i].flags = t->d.flags; sh[i].levels = t->d.levels; nsh++; }
+    total++; if (nz) total_nz++;
+    if (i < nsh) { sh[i].n++; if (nz) sh[i].nz_n++;
+        alias_key ak; alias_key_of(t, &ak);
+        pthread_mutex_lock(&g_smu); int shared = hm_get_id(&g_alias, &ak) != nil; pthread_mutex_unlock(&g_smu);
+        if (nz && (sh[i].nz_n <= 3 || sh[i].nz_n % 2000 == 0)) MLOG("TEXLOST ser=%llu %ux%ux%u format %#x flags %#x levels %u pool flags %#x storage %llu non-zero %llu, %s (shape: %llu GPU-only first uses, %llu with data)",
+            (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.flags, t->d.levels, t->pool->flags, (unsigned long long)t->L.size, (unsigned long long)nz,
+            shared ? "shares an earlier texture over this storage" : "new GPU texture", (unsigned long long)sh[i].n, (unsigned long long)sh[i].nz_n); }
+    if (total % 5000 == 0) { MLOG("TEXLOST summary: %llu GPU-only first uses in CPU-writable pools, %llu with data in their storage", (unsigned long long)total, (unsigned long long)total_nz);
+        for (int k = 0; k < nsh; k++) if (sh[k].nz_n) MLOG("TEXLOST shape %ux%ux%u format %#x flags %#x levels %u: %llu first uses, %llu with data", sh[k].w, sh[k].h, sh[k].d, sh[k].fmt, sh[k].flags, sh[k].levels, (unsigned long long)sh[k].n, (unsigned long long)sh[k].nz_n); }
+}
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
@@ -2799,18 +2824,21 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (ti && t->d.width == tw && t->d.height == th) {
             int seen = 0; for (int i = 0; i < nl; i++) if (last[i] == t->serial) seen = 1;
             static uint64_t n; if (!seen && (n++ < 40 || n % 600 == 0)) { if (nl < 64) last[nl++] = t->serial; else last[n % 64] = t->serial;
-                uint64_t nz = 0; if (t->mem && t->L.size <= (64u << 20)) { uint8_t *m = t->mem, *part = NULL;   // non-zero bytes in guest memory: content the CPU wrote (a sparse pool's texture through its page table)
+                uint64_t nz = 0, h = 1469598103934665603ull, ih = 0; if (t->mem && t->L.size <= (64u << 20)) { uint8_t *m = t->mem, *part = NULL;   // non-zero bytes in guest memory: content the CPU wrote (a sparse pool's texture through its page table)
                     if (t->pool && nvn_sparse_pool(t->pool) && (part = malloc(t->L.size))) { nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); m = part; }
-                    for (uint64_t i = 0; i < t->L.size; i++) nz += m[i] != 0;
+                    for (uint64_t i = 0; i < t->L.size; i++) { nz += m[i] != 0; h = (h ^ m[i]) * 1099511628211ull; }
                     free(part); }
-                MLOG("TEXINFO ser=%llu swizzled=%d has_layout=%d mem=%p pool=%p(%#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u block_h=%d storage %llu bytes non-zero %llu",
+                int nvn_texinfo_init_hash(uint64_t, uint64_t *); int known = nvn_texinfo_init_hash(t->serial, &ih);
+                MLOG("TEXINFO ser=%llu swizzled=%d has_layout=%d mem=%p pool=%p(%#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u block_h=%d storage %llu bytes non-zero %llu, %s since init, host texture %s",
                      (unsigned long long)t->serial, packaged, t->has_layout, t->mem, t->pool, t->pool ? t->pool->flags : 0, (unsigned long long)t->off, t->d.target, t->d.format, t->d.flags, t->d.samples,
-                     t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.stride, t->d.pkg_block_h, (unsigned long long)t->L.size, (unsigned long long)nz); }
+                     t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.stride, t->d.pkg_block_h, (unsigned long long)t->L.size, (unsigned long long)nz,
+                     !known ? "unknown" : ih != h ? "written" : "unchanged", tex_get(t->serial) ? "already made" : "none yet"); }
         }
     }
     id have = tex_get(t->serial);
     if (!packaged && !have && DM_GAME_TEX_DIRTY_UPLOAD && t->mem && on_sub_thread()) { int nvn_ft_written(const tex_t *); packaged = nvn_ft_written(t); }   // first use of a texture the CPU wrote since init without a flush (hle_nvn.c)
     if (!packaged && !have && on_sub_thread() && tex_cpu_content(t)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
+    { static int tl = -1; if (tl < 0) tl = getenv("DM_NVN_TEXLOST") != NULL; if (!packaged && !have && tl) texlost_note(t); }
     if (packaged) {
         NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
@@ -2901,12 +2929,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         tex_put(t->serial, mt);
         return mt;
     }
-    alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d;
-    // IMAGE permits shader writes; it does not change storage. Xenoblade Chronicles 3's depth and stencil-sampling objects differ only by this flag. Separate Metal textures
-    // made the stencil read zero and rejected every deferred-lighting pass. Actual image writes add Metal usage before opening their encoder (image_prepare).
-    ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
-    // An sRGB format and its linear twin read the same bytes: two objects over one storage that differ only so are one texture, the second a view of the first (alias_fmt)
-    ak.d.format = alias_fmt(ak.d.format);
+    alias_key ak; alias_key_of(t, &ak);
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
     if (shared) {
         uint32_t pf = 0; uint8_t swz[4]; id<MTLTexture> st = shared;
