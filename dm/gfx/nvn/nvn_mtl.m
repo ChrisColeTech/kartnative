@@ -33,6 +33,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_vtick.h"   // virtual display-link ticks (link_range, NvMetalDisplayLinkDelegate)
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
@@ -120,6 +121,7 @@ static uint64_t g_link_tick_ns, g_link_tick_n;
 static uint64_t g_link_dropped;
 static uint64_t g_link_empty;   // Under g_pq_mu: ticks that found no new frame queued (counted here, not as ticks minus presents: presents before the link starts and while it is rescued are not on ticks)
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
+static uint64_t g_link_late_n;   // Display-link callback thread only: frames that missed their slot and took a refresh before the next one (virtual ticks, nvn_vtick.h)
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
@@ -11829,9 +11831,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             for (int i = 1; i < 300; i++) { double v = a[i]; int j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
             double b[300]; memcpy(b, e2e, sizeof b);
             for (int i = 1; i < 300; i++) { double v = b[i]; int j = i - 1; while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; } b[j + 1] = v; }
-            MLOG("display link up to tick %llu: ticks 300, presents %llu, empty ticks %llu (held for the present interval %llu), old frames dropped by merging %llu; submission ahead of target display p50 %.3f ms / min %.3f ms; game enqueue to target display p50 %.3f ms / min %.3f / max %.3f ms",
+            MLOG("display link up to tick %llu: ticks 300, presents %llu, empty ticks %llu (held for the present interval %llu), old frames dropped by merging %llu, taken late between ticks %llu; submission ahead of target display p50 %.3f ms / min %.3f ms; game enqueue to target display p50 %.3f ms / min %.3f / max %.3f ms",
                  (unsigned long long)g_link_tick_n, (unsigned long long)g_present_n, (unsigned long long)g_link_empty, (unsigned long long)g_link_held,
-                 (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299]);
+                 (unsigned long long)g_link_dropped, (unsigned long long)g_link_late_n, a[149], a[0], b[149], b[0], b[299]);
         }
     }
     [g_q4 signalDrawable:dr];
@@ -11867,6 +11869,8 @@ static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
 static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
 static double g_link_vperiod, g_link_vhalf;   // virtual ticks (link_range): seconds per counted tick (0 = every callback is a tick) and half a refresh of the screen
+// DM_LINK_LATE=0: with virtual ticks, a frame that missed its slot waits for the next slot instead of taking the next refresh (nvn_vtick.h). Display-link callback thread only
+static int link_late(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_LATE"); on = !(e && !strcmp(e, "0")); } return on; }
 
 @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
 @end
@@ -11896,26 +11900,33 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
     pthread_mutex_unlock(&g_pq_mu);
-    double vp = g_link_vperiod, tol = 0.002;   // tol: how early a tick may come and still end a hold (below)
-    if (vp > 0) {   // virtual ticks: only the refresh nearest each slot of a steady clock at the wanted rate counts (link_range)
-        static double next, vp_was; double t = update.targetPresentationTimestamp;
-        if (vp != vp_was || t > next + vp) { next = t; vp_was = vp; }   // the first callback, a new rate, or after a stall: the clock starts again here
-        if (t < next - g_link_vhalf) return;
-        next += vp; tol += 2 * g_link_vhalf;   // a tick lies up to half a refresh off its slot, so two of them up to one refresh nearer each other than the slots
+    double vp = g_link_vperiod, tol = 0.002, t = update.targetPresentationTimestamp;   // tol: how early a tick may come and still end a hold (below)
+    static nvn_vtick vt; int late = 0;
+    if (vp > 0) {   // virtual ticks: only the refresh nearest each slot of a steady clock at the wanted rate counts, and a frame that missed its slot may take a refresh before the next (link_range, nvn_vtick.h)
+        tol += 2 * g_link_vhalf;   // a tick lies up to half a refresh off its slot, so two of them up to one refresh nearer each other than the slots
+        int pending = 0;
+        if (vt.missed && link_late()) { pthread_mutex_lock(&g_pq_mu); pending = g_dm_present_link && !g_rescue_mode && g_pq_read != g_pq_in && !(g_link_hold_until > 0 && t < g_link_hold_until - tol); pthread_mutex_unlock(&g_pq_mu); }
+        int k = nvn_vtick_step(&vt, t, vp, g_link_vhalf, link_late(), pending);
+        if (k == NVN_VT_SKIP) return;
+        late = k == NVN_VT_LATE;
     }
+    // A late frame's refresh is a tick too: the slot clock starts again from it, so the game's acquire and the vsync event follow the frame that went on screen, as a variable-rate
+    // display's vblank does. Counted only as the missed slot, a game that starts its frame on a tick (Mario Kart World) would keep losing its slot to the late frame: its frame of
+    // that tick taken late, the next tick empty again, 25 ms a frame (tests/t_vtick.c)
     static double cb_prev, gap_max; static int nticks;   // for g_link_ring: callbacks counted as ticks since the previous present, and the longest interval between them
     if (cb_prev > 0 && cb - cb_prev > gap_max) gap_max = cb - cb_prev;
-    cb_prev = cb; nticks++;
+    cb_prev = cb; nticks++; g_link_late_n += late;
     pthread_mutex_lock(&g_link_mu);
     __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
     g_link_tick_n++;
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) { g_link_empty++; nvn_vtick_took(&vt, 0); } pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
+    nvn_vtick_took(&vt, 1);   // a frame waits: this tick takes it or keeps the previous one up for its interval, neither a missed slot
+    if (g_link_hold_until > 0 && t < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
@@ -11948,17 +11959,27 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 // Screens whose refresh rate is not a multiple of the link's (144 or 165 Hz against 60 or 30): asked for 60 Hz, the system fires the link on every third refresh of a 165 Hz screen,
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice.
-// In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync)
+// In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync).
+// Fullscreen on a screen faster than the link (a 120 Hz ProMotion panel, or a 144 Hz one front_screen_match switched to 120) takes virtual ticks too, with the link at the screen's rate:
+// asked for 60 Hz there, the window server shows the layer directly and, by what the timings show, drives the panel at 60 Hz on a phase of its own. In Mario Kart World's race (an M5 Pro, 43,659 frames)
+// every present then went on screen one 120 Hz refresh after its target, the link called back 16.7 and 33.3 ms apart in turn (40 Hz) and the game, which waits for the link's
+// tick at its acquire, ran at 40 fps with every frame ready in time. In the same session's good stretches the link targeted three periods ahead (50 ms) and every present was on time, until one
+// hiccup moved it to two (issues #347, #348: the same trigger). At the panel's own rate every refresh is a target the panel shows, so the 60 Hz slots stay on refreshes it
+// really has (expected from the 120 Hz link's fullscreen runs in docs/reference/frame-rate.md, not yet measured with this change in a window) (nvn_vtick.h)
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
+__attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;
-    if (mode != 2 && hz > rate && hz % rate) {
-        if (g_link_vperiod != 1.0 / rate) MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (the screen's rate is not a multiple of it)", hz, rate);
+    if (mode != 2 && nvn_vtick_on(rate, hz, front_fullscreen())) {
+        int multiple = hz % rate == 0;
+        if (g_link_vperiod != 1.0 / rate || g_link_vhalf != 0.5 / hz)
+            MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (%s)", hz, rate, multiple ? "fullscreen" : "the screen's rate is not a multiple of it");
         g_link_vhalf = 0.5 / hz; g_link_vperiod = 1.0 / rate;
-        return CAFrameRateRangeMake(rate, hz, hz);
+        return multiple ? CAFrameRateRangeMake(hz, hz, hz) : CAFrameRateRangeMake(rate, hz, hz);
     }
+    if (g_link_vperiod > 0) MLOG("display link at %d Hz, every callback a tick", rate);
     g_link_vperiod = 0;
     return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : CAFrameRateRangeMake(60, 60, 60);
 }
@@ -11967,7 +11988,6 @@ static CAFrameRateRange link_range(int mode) {
 // presents one 120 Hz refresh late and the link skips its next tick, though the callbacks run on time and no GPU work is in the way; the frame step read the late frames as load
 // and stepped to 20 fps on frames costing 0.1-0.6 vsyncs, and the game presented 15 frames a second (issues #347, #348). Latency 2 gives 33 ms and removed most of the misses on
 // both machines, for one more frame of input lag in fullscreen only. A workaround: why the system misses at 16 ms is not known (docs/reference/frame-rate.md)
-__attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 static int link_latency(void) { return g_present_latency > 0 ? g_present_latency : front_fullscreen() ? 2 : 1; }
 static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : front_fullscreen() ? "fullscreen" : "window"; }
 static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
@@ -12001,10 +12021,11 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30) want = 3;   // Power-saving mode: display link at 30 Hz
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);
-    // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
-    // while its thread starts (after link_main read the rate) is not lost
-    static int hz_was; int hz = front_screen_max_fps(); CAMetalDisplayLink *lk = g_link;
-    if (lk && hz != hz_was) { hz_was = hz; if (want && want == applied) { lk.preferredFrameRateRange = link_range(want); MLOG("display link: the screen runs at %d Hz now, range set again (frame %llu)", hz, (unsigned long long)atomic_load(&g_cur_frame)); } }
+    // The screen's rate changed (switched by front_screen_match, or another screen) or the window entered or left fullscreen: the range again, virtual ticks or none. Taken only once
+    // the link object exists, so a change while its thread starts (after link_main read the rate) is not lost
+    static int hz_was, fs_was; int hz = front_screen_max_fps(), fs = front_fullscreen(); CAMetalDisplayLink *lk = g_link;
+    if (lk && (hz != hz_was || fs != fs_was)) { hz_was = hz; fs_was = fs;
+        if (want && want == applied) { lk.preferredFrameRateRange = link_range(want); MLOG("display link: the screen runs at %d Hz %s now, range set again (frame %llu)", hz, fs ? "in fullscreen" : "in a window", (unsigned long long)atomic_load(&g_cur_frame)); } }
     int lat = link_latency();   // the window entered or left fullscreen: the latency for it (a link created since took the current one, so a window's link is never set again)
     if (lk && lk.preferredFrameLatency != lat) { lk.preferredFrameLatency = lat; MLOG("display link: frame latency %d (%s; frame %llu)", lat, link_latency_why(), (unsigned long long)atomic_load(&g_cur_frame)); }
     if (want == applied) return;

@@ -81,6 +81,8 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+t_vtick: t_vtick.c ../nvn/nvn_vtick.h
+	clang -O1 -Wall -o $@ t_vtick.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_shader_key: t_shader_key.c ../nvn/nvn_shader_key.h
