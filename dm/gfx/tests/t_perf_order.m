@@ -8,7 +8,7 @@
 // Redirect only this translation unit, and only while the CPU budget cases run.
 static int test_budget_active;
 static struct {
-    uint64_t now, event_elapsed, event_ms, event_fence;
+    uint64_t now, event_elapsed, event_ms, event_ms_max, event_total_ms, event_fence;
     int event_calls, event_success, cond_calls;
     int64_t cond_remaining;
 } test_budget;
@@ -33,10 +33,14 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
 @end
 @implementation WaitBudgetEvent
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
+    // The event is waited for in slices (mtl_wait_at): a slice that times out takes its milliseconds from the event phase's time (event_elapsed), and the slice
+    // that completes the case's milliseconds (event_total_ms) takes what is left of it, so an early failure (less) and an overshoot (more) both show
     test_budget.event_calls++;
     test_budget.event_fence = value;
-    test_budget.event_ms = milliseconds;
-    test_budget.now += test_budget.event_elapsed;
+    test_budget.event_ms += milliseconds;
+    if (milliseconds > test_budget.event_ms_max) test_budget.event_ms_max = milliseconds;
+    uint64_t t = test_budget.event_ms >= test_budget.event_total_ms ? test_budget.event_elapsed : MIN(milliseconds * 1000000ull, test_budget.event_elapsed);
+    test_budget.now += t; test_budget.event_elapsed -= t;
     return test_budget.event_success;
 }
 @end
@@ -223,11 +227,12 @@ static void wait_budgets(void) {
     for (unsigned si = 0; si < sizeof sites / sizeof *sites; si++) {
         for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
             const typeof(*cases) *c = &cases[i];
-            test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed};
+            test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed, .event_total_ms = c->event_ms};
             printf("budget: %s, site=%d, fast=%d, ledger=%d\n", c->name, sites[si], fast, ws_on());
             CHECK("incomplete fence returns false", !mtl_wait_at(1, c->timeout, sites[si]));
-            CHECK("event receives truncated and clamped milliseconds", test_budget.event_calls == fast
-                && (!fast || (test_budget.event_ms == c->event_ms && test_budget.event_fence == 1)));
+            int slices = c->event_ms ? (int)((c->event_ms + 19) / 20) : 1;
+            CHECK("event receives the truncated, clamped milliseconds in slices of at most 20 ms", test_budget.event_calls == (fast ? slices : 0)
+                && (!fast || (test_budget.event_ms == c->event_ms && test_budget.event_ms_max <= 20 && test_budget.event_fence == 1)));
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
             int fallback = fast ? c->fallback : 1;
             uint64_t remaining = fast ? c->remaining : (c->timeout > hour ? hour : c->timeout);
