@@ -35,15 +35,20 @@ int main(void) {
     assert(h_os_Free(t) == 960);
     assert(h_os_Write(t, pcm, 2000) == 960 && h_os_Free(t) == 0);   // cut to the free frames
     sleep_ms(30); assert(h_os_Free(t) == 0);                           // nothing plays before Start
+    uint64_t t0 = now_ns();
     assert(!h_os_Start(t) && h_os_State(t) == OS_STARTED && atomic_load(&g_sig) >= 1);
-    sleep_ms(50);
-    int fr = h_os_Free(t);
-    assert(fr >= 960 && fr <= 3840);   // 20 ms blocks: one to four of the five played after 50 ms
+    // 20 ms blocks played in real time: some by now, and at most two blocks ahead of the clock (four of the five after 50 ms). On a busy machine (a CI runner) the
+    // sleeps run long, so the bounds follow the time measured, not the time asked for
+    int fr = 0; uint64_t ms = 0;
+    for (int i = 0; i < 200 && !fr; i++) { sleep_ms(i ? 5 : 50); fr = h_os_Free(t); ms = (now_ns() - t0) / 1000000; }
+    assert(fr >= 960 && fr <= 960 * (int)(ms / 20 + 2));
+    for (int i = 0; i < 100 && atomic_load(&g_sig) < 2; i++) sleep_ms(10);   // the stream thread signals right after it takes the played blocks back
     int sig = atomic_load(&g_sig); assert(sig >= 2);
-    sleep_ms(100); assert(h_os_Free(t) == 4800);
+    for (int i = 0; i < 100 && h_os_Free(t) < 4800; i++) sleep_ms(10);
+    assert(h_os_Free(t) == 4800);
     assert(h_os_Write(t, pcm, 4800) == 4800 && h_os_Free(t) == 0);
     h_os_Stop(t); assert(h_os_State(t) == OS_STOPPED && h_os_Free(t) == 4800);   // unplayed frames dropped
     h_os_Close(t); assert(h_os_State(t) == OS_CLOSED && !*(void **)t);
-    printf("output stream: free frames follow playback (%d free after 50 ms), writes cut to the free frames, Stop drops the rest, %d data events\n", fr, sig);
+    printf("output stream: free frames follow playback (%d free after %llu ms), writes cut to the free frames, Stop drops the rest, %d data events\n", fr, (unsigned long long)ms, sig);
     return 0;
 }
