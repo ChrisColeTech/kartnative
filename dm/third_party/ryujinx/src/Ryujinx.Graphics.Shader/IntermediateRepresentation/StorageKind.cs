@@ -18,6 +18,9 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         GlobalMemoryS16, // TODO: Remove this and store type as a field on the Operation class itself.
         GlobalMemoryU8, // TODO: Remove this and store type as a field on the Operation class itself.
         GlobalMemoryU16, // TODO: Remove this and store type as a field on the Operation class itself.
+        // nxnative: a 32-bit word at a host GPU address, sources (address low, address high[, compare], [value]): the translation of a global memory
+        // access through a pointer the program read from memory, after the host's address table gave the guest address its host address (GlobalPointers)
+        PhysicalMemory,
     }
 
     static class StorageKindExtensions

@@ -1782,14 +1782,29 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
 
+            // nxnative: a PhysicalStorageBuffer pointer needs its alignment on every load and store (a 32-bit word)
+            bool physical = operation.StorageKind == StorageKind.PhysicalMemory;
+
             if (isStore)
             {
-                context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
+                SpvInstruction store = context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)), physical ? MemoryAccessMask.Aligned : (MemoryAccessMask)int.MaxValue);
+
+                if (physical)
+                {
+                    store.AddOperand((SpvLiteralInteger)4);
+                }
+
                 return OperationResult.Invalid;
             }
             else
             {
-                SpvInstruction result = context.Load(context.GetType(varType), pointer);
+                SpvInstruction result = context.Load(context.GetType(varType), pointer, physical ? MemoryAccessMask.Aligned : (MemoryAccessMask)int.MaxValue);
+
+                if (physical)
+                {
+                    result.AddOperand((SpvLiteralInteger)4);
+                }
+
                 return new OperationResult(varType, result);
             }
         }
@@ -1849,6 +1864,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         baseObj = context.SharedMemories[bindingId.Value];
                     }
 
+                    break;
+
+                case StorageKind.PhysicalMemory:
+                    // nxnative: (address low, address high) of a host GPU address (Translation/Optimizations/GlobalPointers.cs) → a pointer to its 32-bit word
+                    SpvInstruction addressLow = context.Get(AggregateType.U32, operation.GetSource(srcIndex++));
+                    SpvInstruction addressHigh = context.Get(AggregateType.U32, operation.GetSource(srcIndex++));
+                    SpvInstruction address = context.Bitcast(context.TypeInt(64, false), context.CompositeConstruct(context.TypeVector(context.TypeU32(), 2), addressLow, addressHigh));
+
+                    storageClass = StorageClass.PhysicalStorageBuffer;
+                    varType = AggregateType.U32;
+                    baseObj = context.ConvertUToPtr(context.TypePointer(storageClass, context.TypeU32()), address);
                     break;
 
                 case StorageKind.Input:

@@ -45,7 +45,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             context.AddCapability(Capability.Shader);
 
-            context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
+            // nxnative: accesses through host GPU addresses (StorageKind.PhysicalMemory) need physical storage buffer addressing; every other program keeps the logical model
+            if (info.UsesPhysicalMemory)
+            {
+                context.SetMemoryModel(AddressingModel.PhysicalStorageBuffer64, MemoryModel.GLSL450);
+                context.AddCapability(Capability.PhysicalStorageBufferAddresses);
+                context.AddCapability(Capability.Int64);
+                context.AddExtension("SPV_KHR_physical_storage_buffer");
+            }
+            else
+            {
+                context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
+            }
 
             context.AddCapability(Capability.GroupNonUniformBallot);
             context.AddCapability(Capability.GroupNonUniformShuffle);

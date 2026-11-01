@@ -65,6 +65,9 @@ sealed class Accessor : IGpuAccessor
     public SetBindingPair CreateImageBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
     public SetBindingPair CreateStorageBufferBinding(int index) => new(0, _binding++);
 #if !BASELINE
+    /// <summary>SM86 programs translate global memory through a pointer by the host's address table, as the chain does (dmsh_xlate QueryGlobalPointerTable).</summary>
+    public bool GlobalPointers;
+    public bool QueryGlobalPointerTable() => GlobalPointers;
     public GpuGraphicsState QueryGraphicsState()
     {
         var outputs = new Ryujinx.Common.Memory.Array8<AttributeType>();
@@ -290,6 +293,9 @@ static class Harness
         }
 
         var acc = new Accessor(File.ReadAllBytes(file), c1Bytes, local);
+#if !BASELINE
+        acc.GlobalPointers = isa == "sm86";
+#endif
 
         if (layout != null)
         {

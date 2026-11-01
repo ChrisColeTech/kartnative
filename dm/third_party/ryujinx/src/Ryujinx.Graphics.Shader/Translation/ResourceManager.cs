@@ -23,6 +23,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private readonly SetBindingPair[] _cbSlotToBindingMap;
         private readonly SetBindingPair[] _sbSlotToBindingMap;
         private uint _sbSlotWritten;
+        private int _gptrBinding = -1;   // nxnative: GetGlobalPointerTableBinding
 
         private readonly Dictionary<int, int> _sbSlots;
         private readonly Dictionary<int, int> _sbSlotsReverse;
@@ -226,6 +227,22 @@ namespace Ryujinx.Graphics.Shader.Translation
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// nxnative: the binding of the host's global pointer table (GlobalPointers), a storage buffer named GlobalPointers.TableName, declared on first use.
+        /// Its binding comes from IGpuAccessor.CreateStorageBufferBinding with the index one past the guest storage buffer slots.
+        /// </summary>
+        public int GetGlobalPointerTableBinding()
+        {
+            if (_gptrBinding < 0)
+            {
+                SetBindingPair setAndBinding = _gpuAccessor.CreateStorageBufferBinding(_sbSlotToBindingMap.Length);
+                _gptrBinding = setAndBinding.Binding;
+                AddNewStorageBuffer(setAndBinding.SetIndex, _gptrBinding, Optimizations.GlobalPointers.TableName);
+            }
+
+            return _gptrBinding;
         }
 
         public bool TryGetConstantBufferSlot(int binding, out int slot)

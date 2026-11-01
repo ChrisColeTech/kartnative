@@ -137,6 +137,16 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// nxnative: whether a global memory access whose storage buffer GlobalToStorage cannot find (an address read from memory, not a constant buffer)
+        /// is translated through the host's address table: a storage buffer of guest address ranges and their host GPU addresses, which the host fills
+        /// and binds (Translation/Optimizations/GlobalPointers.cs). When false such an access reads 0 and stores nothing, as Ryujinx does.
+        /// </summary>
+        bool QueryGlobalPointerTable()
+        {
+            return false;
+        }
+
+        /// <summary>
         /// Queries Constant Buffer usage information.
         /// </summary>
         /// <returns>A mask where each bit set indicates a bound constant buffer</returns>

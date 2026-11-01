@@ -10,6 +10,9 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
         public HelperFunctionsMask HelperFunctionsMask { get; set; }
 
+        // nxnative: an operation accesses StorageKind.PhysicalMemory (Translation/Optimizations/GlobalPointers.cs)
+        public bool UsesPhysicalMemory { get; set; }
+
         public StructuredProgramInfo()
         {
             Functions = new List<StructuredFunction>();

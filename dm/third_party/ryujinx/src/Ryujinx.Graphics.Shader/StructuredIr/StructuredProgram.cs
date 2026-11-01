@@ -112,6 +112,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 }
             }
 
+            if (storageKind == StorageKind.PhysicalMemory)
+            {
+                context.Info.UsesPhysicalMemory = true;   // nxnative: the SPIR-V declares physical storage buffer addressing (SpirvGenerator)
+            }
+
             bool vectorDest = IsVectorDestInst(inst);
 
             int sourcesCount = operation.SourcesCount;

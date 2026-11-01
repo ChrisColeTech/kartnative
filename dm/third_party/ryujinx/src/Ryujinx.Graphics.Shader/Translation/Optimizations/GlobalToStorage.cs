@@ -653,6 +653,27 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             targetCbs.Sort();
 
+            if (targetCbs.Count == 0 && gpuAccessor.QueryGlobalPointerTable())
+            {
+                // nxnative: an address read from memory: through the host's address table (GlobalPointers)
+                if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
+                {
+                    return true;
+                }
+
+                Function pointerFunction = GlobalPointers.GenerateFunction(resourceManager, gpuAccessor, operation, GetFunctionName(operation, isMultiTarget: true, targetCbs) + "Pointer");
+
+                if (pointerFunction == null)
+                {
+                    functionId = 0;
+                    return false;
+                }
+
+                functionId = gtsContext.AddFunction(operation, isMultiTarget: true, targetCbs, pointerFunction);
+
+                return true;
+            }
+
             if (targetCbs.Count == 0)
             {
                 gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
