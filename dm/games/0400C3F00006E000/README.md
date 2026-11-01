@@ -1,6 +1,6 @@
 # Mario Kart World
 
-Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Bring-up in progress (end of wave 2): headless on the Mac it boots through `nninitStartup`, `nnMain`, the NVN2 device and its graphics setup, renders its loading screen (the world map with the MARIO KART WORLD logo) at 2560x1440 and keeps running: 6,300 frames in a 150 s run with the full shader build (chain d28a1605604e), no out-of-memory and no crash. After the loading screen its 3D scenes are black: 724 of its 727 compute libraries cannot be bound yet and task/mesh draws are skipped ([Graphics status](#graphics-status-wave-2)).
+Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Bring-up in progress (wave 3): headless on the Mac a scripted route goes from a new save through the title, the menus, Grand Prix, the Mushroom Cup and its opening movie to the first race (Mario Bros. Circuit: HUD, lap counter, minimap and countdown on screen) without a crash ([Route on the Mac](#route-on-the-mac-wave-3)). Every 2D screen renders right; the 3D scenes are still mostly black or unlit, the movie does not reach the window, and with the compute passes running the game makes 10-20 fps ([Measurements](#measurements-on-the-mac-wave-3)).
 
 ## Build
 
@@ -56,6 +56,52 @@ From the NVN2 agents' runs (`$W/run/Nvn2*/`), headless:
 - Current stop (end of wave 2): after the loading screen the frames are black (`$W/run/integrator/shot_600.png`, `shot_1800.png`). 724 of the 727 compute libraries are refused at load ("reflection conversion failed: B binding cp_s0 / cp_i_cb0_4_ has no resolved slot number"): NVN2 compute reads its texture, image and storage-buffer bindings from `c[0]` at per-program offsets that the driver fills from the bind calls at dispatch (BindTexture method 0xE68 at word 0x278 + slot, sdk+0x5de120; token handler sdk+0x5c5280), which is not decoded yet. The 7 task and 18 mesh programs are not translated and their draws are skipped.
 - `vi`: `QueryDisplayHdrStatus` answered HDR off at 100 cd/m2; VRR unsupported, so the extended swap interval path (`main+0x226cdcc`..`+0x226ce38`) clears it.
 
+## Graphics status (wave 3)
+
+- Compute bindings (ComputeBind, chain 9adcecae50cf, 3f15eaf4): all 728 compute programs have control `+0xa8` = 1: their texture, image, storage-buffer and uniform bindings come from a packed `c[0]` table per program, which the driver's packer (`sdk+0x5ebbb0`) fills and the dispatch builder (`sdk+0x5eb2b0`) uploads: 0-13 uniform, 0-10 storage, 0-19 texture and 0-7 image entries, `c[0]` sizes 0x8-0x218; the 30 agl NDSR (HMMA) programs also push 8 words of compute push block 0; 14 programs read the workgroup counts at `c[0]` +4 / +8 / +0xc; uniform slots 0-4 are also constant banks 3-7. 727 of 727 compute libraries resolve (3 before). 15 programs (e.g. 0583f1ee7771c651, 1435c9cc8a356868) address storage slot r plus a constant from their own `c[1]` (8 or 0x10), fixed in the global-to-storage pass (bc476260). [NVN2 compute `c0`](../../../docs/reference/shaders.md).
+- Threadgroup memory (ComputeBind, chain c9eaf5476660, 3285f4ca): 168 compute programs of `DrivePassShaderDefault.sharcb` (local size 64x1x1, control `+0x64` = 0xc000) declare 48 KB of shared memory, over Metal's 32 KB; their pipelines failed (`Threadgroup memory size (49152) exceeds ... (32768)`, 10,567 times in a 260 s run, retried on every dispatch). The part past 32 KB now lives in a device buffer the host binds per dispatch (`shared_spill`, compute buffer 28).
+- Chain 0e064b18bfaa on: 11,565 of 11,567 libraries (task 7 / 7, mesh 18 / 18 translated; the replay still skips their draws).
+- Operation mode and crop: docked (the default) the game draws the whole 2560x1440 window texture; handheld (`DM_OPMODE=0`) it draws the top left 1920x1080 and sets `nvnWindowSetCrop(0, 0, 1920, 1080)` (`[nvn] WindowCrop 0,0 1920x1080` with `DM_NVN_LOG=1`); `DM_NVN_SHOT_OUT=1920x1080` shows the present scaling the whole picture in both modes (`$W/run/MacPlay/d1_300.png`, `h2_300.png`).
+
+## Route on the Mac (wave 3)
+
+From a new save (the first boot asks nothing before the title), console mode, headless; the presses are frame steps, applied at the game's own input reads, so they hold at any frame rate:
+
+```
+$W/run/lockrun.sh <name> route 480 DM_MSL_DIR=$W/shader/cache "DM_KEYS=f2500:L+R~f20,f2700:A~f8*8/200,f6000:A~f4000" "DM_NVN_SHOT=2490,2690,2790,2990,3190,3490,3790,3990,4290,6000:$W/run/<name>/route_%d.png"
+```
+
+| Frame | Screen (shot in `$W/run/MacPlay/`) | Input |
+|---|---|---|
+| 0-2400 | loading screen (world map and logo, frames 30-300), then an intro scene behind the title | — |
+| ≈2400 | title: logo and "Press L + R to start" (`r1_3000.png`, `r9_2490.png`) | L+R at 2500 |
+| ≈2600 | main menu: Single Player, Multiplayer, Online Play, Wireless Play, Free Roam (`r2_2600.png`) | A at 2700 |
+| 2790 | Grand Prix, Knockout Tour, Time Trials, VS Race, Battle (`r3_2790.png`) | A at 2900 |
+| 2990 | character select, Mario (`r3_2990.png`) | A at 3100 |
+| 3190 | kart select, Standard Kart (`r3_3190.png`) | A at 3300 |
+| 3490 | cup select, Mushroom Cup (Mario Bros. Circuit, Crown City, Whistlestop Summit, DK Spaceport) (`r3_3490.png`) | A at 3500 |
+| 3790 | "Start Grand Prix?" OK (`r3_3790.png`) | A at 3700, 3900, 4100 |
+| 3990 | loading the course over the world map (`r3_3990.png`) | — |
+| 4140-5573 | the Mushroom Cup movie (`KinokoOp.webm`, [Movies](#movies)) | — |
+| ≈5800 | race 1, Mario Bros. Circuit (`Race_FirstCircuit_A_00`): countdown, coins, lap 1/3, minimap (`r9_6000.png`) | A held from 6000 |
+
+The game itself shows 2560x1440 in console mode; the A presses after the cup select confirm the course preview and the OK prompt (a press during a load is ignored). The same steps with seconds stop working when the frame rate changes; `bench.tsv` holds the route (`gp-race`) and a menus-only one. `DM_FS=1` shows the race's files (`AI/RaceSequence.root.ainb`, `Banc/Race_FirstCircuit_A_00[Game03].bcett.byml.zs`) and, during the race, the item models the CPU racers use (Kinoko, Teresa, Thunder, Banana, Boomerang, Bomhei, Togezo).
+
+## Measurements on the Mac (wave 3)
+
+Apple M5 Pro with 24 GB, headless, console mode, from the host's per-300-frame lines (`[nvn] timing up to frame N`, `[nvn] power up to frame N`, `[nvn-mtl] memory up to frame N`):
+
+| Run | Scene (frames) | Frame time p50 / p95 | fps (power line) | Resident / GPU allocated |
+|---|---|---|---|---|
+| r3, chain d28a1605604e (724 compute programs refused) | menus (2400-4200) | 16.6 / 17-36 ms | 60 | 9.3-10.3 GB / 12.0-12.3 GB |
+| r6, chain 0e064b18bfaa with libraries missing (compute did not run) | race (11700-14400) | 16.7 / 18-28 ms | 57-60 | 11.6 GB / 13.3 GB |
+| r9, chain c9eaf5476660 (compute runs) | intro and title (900-2700) | 27-38 / 115-211 ms | 14-22 | 11.4-12.8 GB / 13.6-14.8 GB |
+| r9 | menus (2700-4200) | 22-66 / 149-295 ms | 11-20 | 12.6-13.5 GB / 14.8-15.0 GB |
+| r9 | movie (4200-5400) | 21-33 / 139-175 ms | 16-21 | 13.3-13.6 GB / 14.8-14.9 GB |
+| r9 | course load and race start (5400-6000) | 28-338 / 194-1181 ms | 2-15 | 13.9-14.0 GB / 15.0-15.1 GB |
+
+With compute running, the game's threads wait more than they work: in `sample` at 80 s (16 fps, `$W/run/MacPlay/r8_sample.txt`, `sample_busy.py` beside it) the Presentation Thread (0x1004, the NVN submit thread) is busy 54% of the time, and half of that is `nvn_dirty_since` ← `nvn_sparse_since` ← `tex_mtl` for each draw that binds a sparse texture (its dirty stamps are scanned over the whole sparse range); the main thread waits on the job system (`main+0x668f8`, `WaitLightEvent`) and under `main+0x25ec590`, the workers are idle. Reported to Nvn2Render; frame time p50 was 16.6 ms before the compute passes ran.
+
 ## Movies
 
 All 49 RomFS movies (`Movie/*.webm`, the cup openings 2560x1440 at 60 fps, e.g. `KinokoOp.webm` 1,423 frames) are VP9 WebM without an audio track. The player (`main+0x6d7000`..`+0x711600`, decoder wrapper `main+0x19e5000`..`+0x19ee000`) feeds `nn::movie::MediaExtractor` itself (`AppendMediaSourceData`) and submits its samples to the `nn::codec` VP9 decoder:
@@ -64,7 +110,9 @@ All 49 RomFS movies (`Movie/*.webm`, the cup openings 2560x1440 at 60 fps, e.g. 
 - frames are waited for with `nn::syncpt::sdk` events: `TryWait`, `Cancel` if unsignalled, `Request` on the acquired buffer's handle, then a multi-wait over all buffers (`main+0x19e7760`, `+0x19e724c`);
 - the buffers are type 1 (CPU, `main+0x711124`): each frame is copied out with `ReadDecoderOutputImageNv12` into the player's own w×h×3/2 buffer (`main+0x19e7950`) and uploaded through NVN; the native image handle path (type 3) is never used; images are released with an all-zero sync handle (`main+0x19e6e00`).
 
-The host serves all of it: [The Switch 2's `nn::codec` video decoders and image pools](../../../docs/reference/movies.md#the-switch-2s-nncodec-video-decoders-and-image-pools), [Sync point events on host counters](../../../docs/reference/movies.md#sync-point-events-on-host-counters-nnsyncptsdk); `MediaExtractor` and the AAC decoder run as the game's own code. Checked headless with `dm/host/tests` `build/t_codec_video /Users/emanuel/Games/Switch/base/romfs/Movie/KinokoOp.webm 120 out.png`: the Mushroom Cup opening goes through the same SDK calls and frame 120 (2.000 s) comes out right (121 frames in 0.63 s). Not reached in a boot yet: the movies come after the loading screen.
+The host serves all of it: [The Switch 2's `nn::codec` video decoders and image pools](../../../docs/reference/movies.md#the-switch-2s-nncodec-video-decoders-and-image-pools), [Sync point events on host counters](../../../docs/reference/movies.md#sync-point-events-on-host-counters-nnsyncptsdk); `MediaExtractor` and the AAC decoder run as the game's own code. Checked headless with `dm/host/tests` `build/t_codec_video /Users/emanuel/Games/Switch/base/romfs/Movie/KinokoOp.webm 120 out.png`: the Mushroom Cup opening goes through the same SDK calls and frame 120 (2.000 s) comes out right (121 frames in 0.63 s).
+
+In a boot (wave 3) the route meets the Mushroom Cup opening after "Start Grand Prix?": `KinokoOp.webm` opens at about frame 4140, `[codec] VP9 decoder 2560x1440 (libvpx / VideoToolbox on a host thread)` follows, and `[codec] VP9 decoder done: 1424 outputs` comes at frame 5573: the player takes one movie frame per game frame, so at 11 fps the 24 s movie lasted 128 s (`$W/run/MacPlay/r9.log`). Its first start aborted in `nv::InitCheck` ([`nv::InitCheck` after the host's `nv::InitializeGraphics`](../../../docs/reference/memory.md#nvinitcheck-after-the-hosts-nvinitializegraphics), 37bc497a). Open (Nvn2Render): no movie frame reaches the window; every screenshot from frame 4190 to 5500 is the same picture (`r9_4290.png`, a dark course fly-by).
 
 ## Shaders
 
@@ -97,6 +145,7 @@ Full translation (chain d28a1605604e, translator 2057b672; [Switch 2 translation
 - [The Switch 2's `nn::codec` video decoders and image pools](../../../docs/reference/movies.md#the-switch-2s-nncodec-video-decoders-and-image-pools), [Sync point events on host counters](../../../docs/reference/movies.md#sync-point-events-on-host-counters-nnsyncptsdk) and [`MediaExtractor` and the AAC decoder run natively](../../../docs/reference/movies.md#nnmoviemediaextractor-and-the-aac-decoder-run-natively) ([Movies](#movies)).
 - [NVN2 command buffers (Switch 2)](../../../docs/reference/rendering.md) (Nvn2Cmd, ad8eaa55): bank 24, the new command-buffer entries ([Graphics status](#graphics-status-wave-2)).
 - [Switch 2 block-linear GOBs](../../../docs/reference/nvn-objects.md#switch-2-block-linear-gobs): the exchanged in-GOB offset bits.
+- [`nv::InitCheck` after the host's `nv::InitializeGraphics`](../../../docs/reference/memory.md#nvinitcheck-after-the-hosts-nvinitializegraphics): an abort at `sdk+0x54e09c` when the Mushroom Cup movie started.
 - `vi` HDR and VRR calls (`QueryDisplayHdrStatus`, `QueryDisplayVrrSupported`, `QueryDisplayHdrPaperWhite`, `SetDisplayVrrCapability`): the SDK answers 0x272 (or nothing) for a display that is not its own `DefaultDisplay` (`sdk+0xe151f8`), and the host's is not, so main takes its no-VRR, no-HDR path (`main+0x226cce4`) without reaching the vi2 service. Not hooked.
 
 ## How to run it on the Mac
@@ -108,13 +157,13 @@ cd $W/run && DM_ROMFS=/Users/emanuel/Games/Switch/base/romfs DM_SAVE=$W/run/save
   perl -e 'alarm shift; exec @ARGV' 60 dmhost $W/patched
 ```
 
-`DM_SVC=1 DM_THR=1 DM_FS=1 DM_NVN_LOG=1` for the boot details. Agents run it only through `$W/run/lockrun.sh <name> <log> <seconds> [VAR=value …]` (one host build and run at a time). `DM_NVN_API` is no longer needed: the host answers NVN2's 231.16 for Switch 2 games.
+`DM_SVC=1 DM_THR=1 DM_FS=1 DM_NVN_LOG=1` for the boot details. Agents run it only through `$W/run/lockrun.sh <name> <log> <seconds> [VAR=value …]` (one host build and run at a time), with `DM_MSL_DIR=$W/shader/cache` for the shader libraries of the current chain (`b-<chain>/`: a host built from a newer chain finds no libraries and renders black). `DM_NVN_API` is no longer needed: the host answers NVN2's 231.16 for Switch 2 games. The scripted route is in [Route on the Mac](#route-on-the-mac-wave-3) and in `bench.tsv` (`scripts/bench.py` opens a window: not for headless agents).
 
 ## Open
 
-- Sparse virtual textures (Nvn2Tex): the current stop, see [Graphics status](#graphics-status-wave-2).
-- Mesh and task shaders (7 + 18 programs, `ISBERD` / `ISBEWR`): not translated, their draws are skipped. The per-primitive shading rate index (`a[0x5c]`, written by 2,838 vertex programs) is dropped, so those draws shade at full rate; two programs reach global memory through a pointer read from a storage buffer (0459a55e79335cf6, 791fb7522aa03e61) and lose those accesses.
-- Compute reflection: 724 of the 727 compute libraries have slots the reflection cannot decode (NVN2 compute reads texture, image and storage-buffer bases from c[0] at program-specific offsets; the dispatch-time mapping in the sdk's token handler, `sdk+0x5c5280`, is not decoded), so the host refuses them (`[RED] shader <key>_b reflection conversion failed ... has no resolved slot number`).
-- Movies, output streams and the socket calls behind Pia are served but not met in a boot yet. Pia's network start (`main+0x22477b4`) stops at `nifm::IsNetworkAvailable` (false), before `nn::socket::internal::Initialize`; the SDK 19 socket overloads it would call next (`Socket(Family, Type, Protocol)`, `Bind(SockAddr)`, `SetSockOpt(Level, Option)`, `Close`, `EventFd*`, `GetPeerName(sockaddr)`, `GetAddrInfo` with resolver options, `Resolver{Get,Set}Option`, `IsInitialized`, `SetAllocator`) and `nn::ssl::Context::Create` (which returns 0xca7b without a service session) are not hooked.
+- The 3D scenes (Nvn2Render, ComputeBind, MeshTask): with the compute bindings resolved (chain 9adcecae50cf on) the title, the menus' characters and the race show sky and silhouettes but no lit geometry; a black 640x360 rectangle at the top left of the 3D picture (`r9_5750.png`, `h1_450.png`); mesh and task draws are still skipped in the replay (`NVN2 mesh-shader draw ... skipped`, 18-20 per run). The per-primitive shading rate index (`a[0x5c]`, written by 2,838 vertex programs) is dropped, so those draws shade at full rate; two programs reach global memory through a pointer read from a storage buffer (0459a55e79335cf6, 791fb7522aa03e61) and are not translated.
+- Frame rate (Nvn2Render): 60 fps while the compute passes could not run, 10-20 fps since they do ([Measurements](#measurements-on-the-mac-wave-3)); the stall found so far is the sparse-texture dirty check on every draw.
+- The movie does not reach the window ([Movies](#movies)).
+- Output streams and the socket calls behind Pia are served but not met on the route (the sound goes through the audio renderer: `audren: rendered 48000 frames, 44142 of them not silent`). Pia's network start (`main+0x22477b4`) stops at `nifm::IsNetworkAvailable` (false), before `nn::socket::internal::Initialize`; the SDK 19 socket overloads it would call next (`Socket(Family, Type, Protocol)`, `Bind(SockAddr)`, `SetSockOpt(Level, Option)`, `Close`, `EventFd*`, `GetPeerName(sockaddr)`, `GetAddrInfo` with resolver options, `Resolver{Get,Set}Option`, `IsInitialized`, `SetAllocator`) and `nn::ssl::Context::Create` (which returns 0xca7b without a service session) are not hooked; Online Play stays unavailable.
 - AV1 movies: the host has no AV1 decoder (`InitializeAv1Decoder` fails with a red line); MKW has none.
 - The Switch 2's display: `oe::GetDefaultDisplayResolution` answers the Switch's 1920x1080 / 1280x720; MKW does not import it.
