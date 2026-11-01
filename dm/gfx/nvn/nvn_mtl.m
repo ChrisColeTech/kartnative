@@ -5942,7 +5942,10 @@ static int pso4_on(void) {
 static id<MTL4Compiler> g_comp4;
 // g_arch4: the files that may hold bases with a vertex layout, g_arch4p: the files that hold none (p<seq>.mtl4a: the prebuild's, and any flush whose bases all read their vertices
 // themselves). A base with a layout is looked up in g_arch4 alone: each file a lookup misses in costs about 0.06 ms, and a cold start's misses were for such bases, in the 13 prebuilt files
+// g_arch4p also takes each such file this run writes (arch_write), so the prebuild's bases serve the draws in the run that built them, not only from the next start on (arch4p_now)
 static NSArray<id<MTL4Archive>> *g_arch4, *g_arch4p; static NSString *g_arch_dir; static int g_arch_seq;
+static os_unfair_lock g_arch4p_lock = OS_UNFAIR_LOCK_INIT;   // arch_write replaces g_arch4p while other threads look bases up in it; g_arch4 is set once (pso4_init)
+static NSArray<id<MTL4Archive>> *arch4p_now(void) { os_unfair_lock_lock(&g_arch4p_lock); NSArray<id<MTL4Archive>> *a = g_arch4p; os_unfair_lock_unlock(&g_arch4p_lock); return a; }
 // Compaction: every start writes a file or more (each flush captures only what is new), Breath of the Wild 5-7 per start, and each file a base is not in costs a lookup about 0.06 ms.
 // With more than PSO_ARCH_COMPACT files of bases with a vertex layout, the bases the prewarm takes from them are captured again from the original shader functions, so the flush
 // after the prewarm writes them into one file; the old files are then removed (open archives stay usable for the rest of the run). Bases the
@@ -6151,7 +6154,7 @@ static void pso4_init(void) {
             MLOG("pipeline archive %s: %lu files (%lu of bases without a vertex layout), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)(arch.count + archp.count - (g_arch_bundle != nil)),
                  (unsigned long)archp.count - (g_arch_bundle != nil), bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
-        g_arch4 = arch; g_arch4p = archp;
+        g_arch4 = arch; os_unfair_lock_lock(&g_arch4p_lock); g_arch4p = archp; os_unfair_lock_unlock(&g_arch4p_lock);
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
         else if (g_arch_dir) {
@@ -6179,6 +6182,11 @@ static void arch_write(ArchEpoch *ep) {
     if (!ok) { MLOG("[RED] pipeline archive: writing %s failed%s%s", path.UTF8String, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); unlink(tmp.fileSystemRepresentation); }
     else {
         g_arch_flush_ok = 1;
+        // A file of bases without a vertex layout (the prebuild's, the pulling bases a hybrid draw takes without compiling: pso_build_ex(..., 0)) joins the lookups at once. Before, a
+        // first start built them all in the prepare step and its draws could not use them until the next start: on Mario Kart World's first race the hybrid draws found no pulling
+        // base and waited for their pipelines on the submit thread instead (4 draws, 274 ms in one frame)
+        id<MTL4Archive> na = vd ? nil : [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
+        if (na) { os_unfair_lock_lock(&g_arch4p_lock); g_arch4p = [@[na] arrayByAddingObjectsFromArray:g_arch4p ?: @[]]; os_unfair_lock_unlock(&g_arch4p_lock); }   // newest first, as pso4_init orders them
         MLOG("pipeline archive: %d new pipeline bases written to %s (%.1f MB, %.0f ms)", n, path.lastPathComponent.UTF8String,
              [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
     }
@@ -6296,7 +6304,8 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     else {
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
-        if (!vd) for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
+        NSArray<id<MTL4Archive>> *ap = arch4p_now();
+        if (!vd) for (id<MTL4Archive> a in ap) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
         int from_run = 0;
         if (!base) for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) { from_run = 1; break; }
         uint64_t t1 = bp_now();
@@ -6308,7 +6317,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
             if (cb) { base = cb; g_compacted++; }
         }
         if (!base) {
-            if (g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
+            if (g_arch4.count + ap.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
             if (compile) {
                 NSError *be = nil; base = arch_capture(b, &be, vd); job->error = be; job->compiled = 1;
                 g_pt_comp_ns += bp_now() - t1;
@@ -6558,7 +6567,7 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
         if (g_pre_known.count && g_pre_known[[NSString stringWithFormat:@"%@\t%@", vk, fk]]) { g_pre_skipped++; g_pre_known_n++; return; }
         MTL4RenderPipelineDescriptor *m = pre_desc(vk, fk, zero);
         if (!m) { g_pre_skipped++; return; }
-        for (id<MTL4Archive> a in g_arch4p) if ([a newRenderPipelineStateWithDescriptor:m error:nil]) { g_pre_archived++; return; }
+        for (id<MTL4Archive> a in arch4p_now()) if ([a newRenderPipelineStateWithDescriptor:m error:nil]) { g_pre_archived++; return; }
         for (id<MTL4Archive> a in g_arch4) if ([a newRenderPipelineStateWithDescriptor:m error:nil]) { g_pre_archived++; return; }
         NSError *e = nil; id ps = arch_capture(m, &e, 0);
         if (ps) g_pre_built++;
