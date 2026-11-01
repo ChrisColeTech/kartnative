@@ -17,6 +17,15 @@ static int mesh2_on(void) {
     if (on < 0) { const char *e = getenv("DM_NVN_MESH"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_MESH=0: NVN2 mesh-shader draws are skipped (diagnostic; the picture lacks their geometry)"); }
     return on;
 }
+// Diagnostic DM_NVN_MESH_SKIP=<key prefix>[,...]: skips the mesh draws whose task, mesh or fragment key starts with one of them (to find which program a wrong picture comes from)
+static int mesh2_skip_key(const Mesh2Prog *mp) {
+    static char keys[16][20]; static int n = -1;
+    if (n < 0) { n = 0; for (const char *q = getenv("DM_NVN_MESH_SKIP"); q && *q && n < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t l = strcspn(q, ","); if (l > 19) l = 19; memcpy(keys[n], q, l); keys[n++][l] = 0; }
+                 if (n) MLOG("DM_NVN_MESH_SKIP: skipping the mesh draws of %d key prefixes (diagnostic; the picture is wrong)", n); }
+    for (int i = 0; i < n; i++) { size_t l = strlen(keys[i]);
+        if ((mp->ts && !strncmp(mp->ts->key, keys[i], l)) || !strncmp(mp->ms->key, keys[i], l) || (mp->pr->sh[1] && !strncmp(mp->pr->sh[1]->key, keys[i], l))) return 1; }
+    return 0;
+}
 // The facts dmsh_build.py writes beside a task / mesh library ("mesh": dmsh_mesh.layout); 0 when the json has none
 static int mesh2_info(NvShader *sh, uint32_t *threads, uint32_t *payload, int *task) {
     NSData *d = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%s.json", g_msl_dir, sh->key]];
@@ -148,6 +157,7 @@ static void mesh2_draw(const p_mesh *m) {
     if (!mp) { g_mesh2_skip++; PD("Z %llu mesh draw skipped: the bound mesh program has no libraries", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *bound = !mp->fs && S.prog ? prog_get(S.prog) : nil;
     mp->pr->sh[1] = mp->fs ? mp->fs : bound ? bound->sh[1] : nil;
+    if (mesh2_skip_key(mp)) { g_mesh2_skip++; return; }
     int three = m->kind == MESH_TASKS_3D || m->kind == MESH_3D_INDIRECT || m->kind == MESH_3D_MULTI_INDIRECT || m->kind == MESH_3D_MULTI_INDIRECT_COUNT;
     if (three) MESH2_RED_ONCE("NVN2 3-D mesh draw (kind %d): its workgroups are drawn in a row, x * y * z of them (how the program learns the grid's shape is not known)", m->kind);
     if (m->kind == MESH_TASKS) { mesh2_one(mp, (uint32_t)m->x, (uint32_t)m->y); return; }
