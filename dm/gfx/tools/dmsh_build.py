@@ -486,7 +486,7 @@ def sm86_code(rec):
     instructions only; c1 is the constant segment (control +0x40, +0x3c bytes: BRX tables). The 0xd8-byte NVN2 control section has none of the Switch 1 fields job_for
     reads (c1 at +0x700, transform feedback at +0x6dc, early fragment tests at +0x718); where NVN2 keeps the last two is not known yet, so neither is set"""
     ctl, code = sm86_control(rec)
-    if ctl is None: return None
+    if ctl is None or code is None: return None
     return nvn2.stage(ctl), code[:nvn2.control(ctl)['code_end']], nvn2.c1(ctl, code)
 
 def sm86_control(rec):
@@ -501,7 +501,9 @@ def job_for(key, name, rec, w):
         (stage, code, c1), extra = sm86, {'isa': 'sm86'}
         if stage in ('ts', 'ms'):   # task / mesh: the layout from the control and the whole code area (a mesh program's second header lies past +0x38); ValueError on a form it does not know
             ctl, area = sm86_control(rec)
-            lay = dmsh_mesh.layout(ctl, area); extra.update(mesh=lay, local=lay['local'])
+            lay = dmsh_mesh.layout(ctl, area)
+            if lay is None: raise ValueError(f'{stage}: control +0x56 is no task or mesh stage')   # nvn2.stage and dmsh_mesh.layout read the same byte
+            extra = {**extra, 'mesh': lay, 'local': lay['local']}
     else:
         ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)

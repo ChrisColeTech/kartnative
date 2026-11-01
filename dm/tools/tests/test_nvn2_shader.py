@@ -102,7 +102,7 @@ class Control(unittest.TestCase):
         ctl[0xa9] = 8; ctl[0xb2] = 3; ctl[0xb3] = 1; ctl[0xb6] = 2; struct.pack_into('<H', ctl, 0xba, 0x78)
         self.assertEqual(nvn2.compute_c0(bytes(ctl)), (0x78, [('push_block', 0, 0x10, 8), ('storage', 0, 0x30, 3), ('texture', 0, 0x60, 1), ('image', 0, 0x68, 2)]))
         ctl[0xa9] = 0; ctl[0xb1] = 4; ctl[0xb2] = 2; ctl[0xb6] = 0; struct.pack_into('<H', ctl, 0xba, 0x78)
-        self.assertEqual(nvn2.compute_c0(bytes(ctl))[1], [('uniform', 0, 0x10, 4), ('storage', 0, 0x50, 2), ('texture', 0, 0x70, 1)])
+        self.assertEqual(nvn2.compute_c0(bytes(ctl)), (0x78, [('uniform', 0, 0x10, 4), ('storage', 0, 0x50, 2), ('texture', 0, 0x70, 1)]))
         ctl[0xa9] = 3   # 3 push words take a 16-byte row: the tables no longer end at +0xba
         with self.assertRaises(ValueError): nvn2.compute_c0(bytes(ctl))
         ctl[0xa8] = 0
