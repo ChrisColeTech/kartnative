@@ -7,15 +7,25 @@
 #pragma once
 #import <GameController/GameController.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "dm_input.h"
 
 static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;
     return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
 }
-// DM_BTN_A / B / X / Y of the pad's pressed face buttons
-static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+// DM_PAD_SWAP=1 exchanges A with B and X with Y after that mapping, for every pad: for a player used to a pad's printed labels (a DualSense's bottom button
+// confirms as A, its right one cancels as B, left X, top Y) rather than the Switch's positions; read once
+static inline int dm_pad_swap_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PAD_SWAP"); v = e && atoi(e) ? 1 : 0; }
+    return v;
+}
+// DM_BTN_A / B / X / Y of the pad's pressed face buttons; swap as DM_PAD_SWAP
+static inline uint64_t dm_pad_face_swap(GCExtendedGamepad *g, int swap) {
     GCControllerButtonInput *a = g.buttonA, *b = g.buttonB, *x = g.buttonX, *y = g.buttonY;
     if (!dm_pad_labelled(g.controller)) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
+    if (swap) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }
     return (a.isPressed ? DM_BTN_A : 0) | (b.isPressed ? DM_BTN_B : 0) | (x.isPressed ? DM_BTN_X : 0) | (y.isPressed ? DM_BTN_Y : 0);
 }
+static inline uint64_t dm_pad_face(GCExtendedGamepad *g) { return dm_pad_face_swap(g, dm_pad_swap_on()); }
