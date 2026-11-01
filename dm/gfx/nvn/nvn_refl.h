@@ -8,7 +8,8 @@
 #include <stdint.h>
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
-       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH };
+       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GPTR };
+// GPTR: the global pointer table (dmsh_abi.h DMSH_GPTR_*): every memory pool's guest range and Metal GPU address, which the shader looks a pointer it read from memory up in (nvn_mtl.m gptr_gpu)
 // PUSH: an NVN2 push-constant block (constant bank DMSH_PUSH_BANK0 + reg of an SM86 graphics program), filled with what the command buffer last pushed (nvn2_cmd.h, nvn_mtl.m encode_args)
 // TEXP / SAMPP: the texture / sampler pool as one array indexed by the handle's ID, for a handle the translator traced to no slot (dmsh_build.py pool_arrays): one argument buffer entry,
 // the address of the buffer the replay keeps for the element type dtt / dpf and the pool bound at the draw (nvn_mtl.m pool_gpu). Mario Party Superstars' characters
@@ -55,6 +56,7 @@ typedef struct {
     uint8_t border;          // index in b of the BORDER binding + 1, 0 = none
     uint8_t dyn;             // Has TEXD / SAMPD bindings: c2's texture and sampler tables hold slot indices for this shader
     uint8_t pool;            // Has TEXP / SAMPP bindings (it also sets bindless): its argument block holds pool addresses, which change when a pool is rebuilt
+    uint8_t gptr;            // Has the GPTR binding: its argument block holds the table's address, which changes when a memory pool is added or removed (nvn_mtl.m gptr_gpu)
     uint8_t drv_read[3];     // B: reads driver segments c0 / c2 at runtime (indices 0, 2; gathered statically from the MSL at packaging time, tools/dmsh_build.py drv_reads)
     uint16_t c1_len;         // Length of the c1 constant segment (B; 0 / 256 / 512 / 768 across the whole library)
     // For the fully-covering-first-draw proof (dmsh_build.py raster_facts; missing field = not provable): vertex - position xyz taken as-is from attribute pos_attr (-1 = no), w is the constant 1 (pos_w1) or taken from the same attribute's .w;

@@ -89,6 +89,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
+            else if ([k isEqualToString:@DMSH_KIND_GPTR]) { if (o->gptr) FAIL("two global pointer tables"); r->kind = NVN_RB_GPTR; r->rw = 1; o->gptr = 1; }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }

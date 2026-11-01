@@ -610,6 +610,60 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     return ok;
 }
 
+// ---------- Global pointer table (dmsh_abi.h DMSH_GPTR_*) ----------
+// A shader that reads a pointer from memory and accesses global memory through it (Mario Kart World: gsys's clear_geometry_culling vertex program stores through a list of
+// pointers, agl's invalid_pixel_detector loads through one) has no storage buffer binding for that memory: the guest address is a memory pool's CPU address (hle_nvn.c, the
+// driver's GPU VA == CPU VA), and the pool's Metal buffer lies at a GPU address of its own. The translation (GlobalPointers.cs) looks the address up in this table, every pool's
+// range with the difference to its Metal address, and accesses the result through a device pointer. The GPU can only reach resident memory and the shader may reach any pool,
+// so building the table puts every pool into the residency set (otherwise on demand, pool_res). Overlapping pools (aliases of one memory) give each address to the pool that
+// starts first. An address in no pool reads 0, stores nothing and counts a miss in the table's header, which gptr_misses logs
+_Static_assert(DMSH_GPTR_HEADER == 4 * sizeof(uint32_t) && DMSH_GPTR_ENTRY == 4 * sizeof(uint64_t), "gptr_gpu writes this layout");
+static _Atomic uint64_t g_gptr_missed;   // misses counted so far in every table
+static void gptr_misses(id<MTLBuffer> b, uint32_t *seen) {
+    const volatile uint32_t *h = (const volatile uint32_t *)b.contents; uint32_t m = h[1];
+    if (m == *seen) return;
+    uint64_t addr = (uint64_t)h[2] | (uint64_t)h[3] << 32, total = atomic_fetch_add(&g_gptr_missed, m - *seen) + (m - *seen); *seen = m;
+    static _Atomic int nlog; int k = atomic_fetch_add(&nlog, 1);
+    if (k < 8 || !(k & (k - 1))) MLOG("[RED] global memory through a pointer: %llu accesses so far reached no memory pool (the last at %#llx): their loads read 0, their stores and atomics were dropped",
+                                      (unsigned long long)total, (unsigned long long)addr);
+}
+@interface NvGptrTable : NSObject { @public id<MTLBuffer> buf; uint32_t seen; } @end
+@implementation NvGptrTable
+- (void)dealloc { gptr_misses(buf, &seen); }   // released after the last submission that bound it completed (defer_obj_unref): its count is final
+@end
+static NvGptrTable *g_gptr; static uint64_t g_gptr_gen;   // the current table and the pool generation it was built for (submit thread)
+typedef struct { uint64_t lo, hi, delta; } gptr_seg;
+static int gptr_cmp(const void *a, const void *b) { const gptr_seg *x = a, *y = b; return x->lo < y->lo ? -1 : x->lo > y->lo ? 1 : x->hi > y->hi ? -1 : x->hi < y->hi; }
+static uint64_t gptr_gpu(__unsafe_unretained id<MTLBuffer> *out) {
+    if (g_gptr && g_gptr_gen == atomic_load_explicit(&g_pool_gen, memory_order_acquire)) { gptr_misses(g_gptr->buf, &g_gptr->seen); *out = g_gptr->buf; return g_gptr->buf.gpuAddress; }
+    pthread_mutex_lock(&g_mu);
+    uint64_t gen = atomic_load(&g_pool_gen); int n = g_npool, added = 0;
+    gptr_seg *s = malloc((size_t)(n ? n : 1) * sizeof *s);
+    for (int i = 0; i < n; i++) {
+        if (!g_pools[i].res) { res_add(g_pools[i].buf); g_pools[i].res = 1; g_pool_res_n++; added++; }
+        s[i] = (gptr_seg){g_pools[i].lo, g_pools[i].hi, g_pools[i].gpu - g_pools[i].base};   // Metal address = guest address + delta (mod 2^64)
+    }
+    pthread_mutex_unlock(&g_mu);
+    qsort(s, (size_t)n, sizeof *s, gptr_cmp);
+    int m = 0; uint64_t end = 0;
+    for (int i = 0; i < n; i++) { uint64_t lo = MAX(s[i].lo, end); if (lo >= s[i].hi) continue; s[m++] = (gptr_seg){lo, s[i].hi, s[i].delta}; end = s[i].hi; }   // overlaps cut
+    int cap = 1 << DMSH_GPTR_STEPS, l = 0;
+    if (m > cap - 1) { static int once; if (!once++) MLOG("[RED] global pointer table: %d memory pool ranges, more than its %d: addresses in the last %d read 0 and store nothing", m, cap - 1, m - (cap - 1)); m = cap - 1; }
+    while ((1 << l) < m + 1) l++;   // a power of two of entries, at least one of them the sentinel
+    size_t bytes = DMSH_GPTR_HEADER + ((size_t)1 << l) * DMSH_GPTR_ENTRY;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    uint32_t *h = (uint32_t *)b.contents; h[0] = (uint32_t)(DMSH_GPTR_STEPS - l); h[1] = h[2] = h[3] = 0;
+    uint64_t *e = (uint64_t *)((uint8_t *)b.contents + DMSH_GPTR_HEADER);
+    for (int i = 0; i < 1 << l; i++) { e[4 * i] = i < m ? s[i].lo : ~0ull; e[4 * i + 1] = i < m ? s[i].hi : ~0ull; e[4 * i + 2] = i < m ? s[i].delta : 0; e[4 * i + 3] = 0; }
+    free(s);
+    res_add(b); res_commit();
+    if (g_gptr) { gptr_misses(g_gptr->buf, &g_gptr->seen); defer_obj_release(g_gptr->buf); defer_obj_unref(g_gptr); }
+    NvGptrTable *t = [NvGptrTable new]; t->buf = b; g_gptr = t; g_gptr_gen = gen;
+    static int nlog; if (nlog < 8 || !(nlog & (nlog - 1))) MLOG("global pointer table %d: %d ranges of %d memory pools (%zu bytes), %d pools made resident for it", nlog, m, n, bytes, added);
+    nlog++;
+    *out = b; return b.gpuAddress;
+}
+
 // ---------- Submission ----------
 static void defer_reset(void); static void defer_fallback(void);
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; void *vis; uint32_t seg; } post_op;   // vis: the visibility slot table for kind 3, the readback for kind 4; seg: the segment it was encoded in (sub_cut)
@@ -4958,7 +5012,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h) {
 static int prog_swrites(NvProg *pr) {
     int w = 0;
     for (int st = 0; pr && st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
+        for (int i = 0; i < sh->rf.nb; i++) if ((sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) || sh->rf.b[i].kind == NVN_RB_GPTR) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }   // GPTR: stores through pointers
     return w;
 }
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
@@ -7193,7 +7247,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();
-    if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !(sh->rf.pool && sh->ab_pgen != g_psnap_gen)) {
+    if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !(sh->rf.pool && sh->ab_pgen != g_psnap_gen) && !sh->rf.gptr) {   // gptr: the table's address and the write note, per encode
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);
         g_stat_args_reuse++;
         return 1;
@@ -7382,6 +7436,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
             slots[aid] = support_gpu();
             USE(support_buf(), MTLResourceUsageRead);
+        } else if (b->kind == NVN_RB_GPTR) {   // the global pointer table (gptr_gpu). The shader may store anywhere through it: a write of unknown range for this submission's shadows
+            __unsafe_unretained id<MTLBuffer> gb = nil; slots[aid] = gptr_gpu(&gb);
+            USE(gb, MTLResourceUsageRead | MTLResourceUsageWrite);
+            sbw_note(0, 0, SBW_GPU);
+            if (bl) PD("B %llu st%d gptr table %#llx", g_stat_pass, nvn_stage, (unsigned long long)slots[aid]);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
             // c2 = the handle tables (DMSH_C2_*), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time

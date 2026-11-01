@@ -228,6 +228,12 @@ t_sbw: t_sbw.m $(MTL_T_DEP)
 .PHONY: check_t_sbw
 check_t_sbw: t_sbw
 	./t_sbw
+# The global pointer table (gptr_gpu); `make check_t_gptr GPTR_LIB=<library folder>` also runs Mario Kart World's two pointer programs from a dmsh_build.py output on the GPU
+t_gptr: t_gptr.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gptr.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_gptr
+check_t_gptr: t_gptr
+	./t_gptr $(GPTR_LIB)
 t_direct_upload: t_direct_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_direct_upload.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_direct_upload
