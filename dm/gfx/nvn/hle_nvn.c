@@ -1352,7 +1352,12 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+    // The acquire sync: the texture is free once the display has moved on from it, that is once the present that replaced it on screen is displayed, which needs that frame's GPU work.
+    // A Switch 2 build takes the fence of that present (rel, set in nvnQueuePresentTexture): with 3 active textures the frame after next may start while the GPU runs the next one, as on the device,
+    // where all the commits so far (the frame just submitted) serialized the game's CPU and GPU frames. With 2 active textures the replacing present is the latest one, the same fence as before.
+    // Mario Kart World (3 active) gained nothing measurable from it: right after the acquire sync its main thread waits on the fence it set after its previous frame (main+0x25ec5a0).
+    // Switch 1 games keep the fence of all commits so far
+    if (s) { uint64_t rf = DM_GAME_SWITCH2 && *idx < 4 ? o->rel[*idx] : 0; ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = rf ? rf : mtl_last_fence(); }   // fenced 2: an acquire sync, for the wait ledger
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -1840,6 +1845,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_cap_present(t, crop);   // DM_NVN_CAPTURE (nvn_capture.inc)
         o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop);
+        // This present replaces the image shown before it: that one is free once this frame's work (every commit so far) is done (acquire). This image waits for its own replacement
+        if (o->shown > 0 && o->shown <= 4) o->rel[o->shown - 1] = mtl_last_fence();
+        o->rel[idx] = 0; o->shown = idx + 1;
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);

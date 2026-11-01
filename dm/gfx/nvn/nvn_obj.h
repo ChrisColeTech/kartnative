@@ -62,8 +62,9 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;   // nactive: SetNumActiveTextures (0 = all)
 FITS(win_builder_t, NVNwindowBuilder);
-// avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive: SetNumActiveTextures (0 = all)
+// avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer;
+// rel[i]: the fence after which image i is free (Switch 2: the fence of the present that replaced it on screen, 0 = none yet); shown: 1 + the image presented last (0 = none)
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, shown; uint64_t rel[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive: SetNumActiveTextures (0 = all)
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
