@@ -1845,8 +1845,9 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2]; nvn_stex *stex; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, vone_gen; const void *span, *vone; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2]; nvn_stex *stex; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
+// vone: the one dirty-tracking range every mapped run lay in at the last clean walk, with the page table's generation then (vone_gen); NULL = several ranges, or no clean walk yet
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take)
 // stex: a large sparse texture backed by a Metal placement-sparse texture (../tex/nvn_sparse_tex.h, stex_sync): tex is its texture, synced in place, never replaced
 @implementation NvPkg
@@ -2288,7 +2289,7 @@ static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_d
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
 int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_pool_gen(const void *pool); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);
-int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp, const void **one); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
 // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; keep: usage the texture it replaces was upgraded to (tex_upgrade), which the new one
 // is made with: a texture drawn into and re-uploaded (a CPU write into one the game renders into) was made without render-target use again and upgraded at its next attachment, a
 // second texture and a copy of every level for each re-upload, and its spare (of other usage) was never reused
@@ -2665,7 +2666,7 @@ static void sparse_view(NvPkg *pk, const tex_t *t) {
 enum { STEX_MIN_BYTES = 32u << 20, STEX_BUDGET = 256u << 20 };
 typedef struct { const void *pool; uint64_t vgen, stamp; int all; } stex_gctx;
 static int stex_mapped(void *c, uint64_t a, uint64_t n) { return nvn_sparse_mapped(((stex_gctx *)c)->pool, a, n); }
-static int stex_changed(void *c, uint64_t a, uint64_t n) { stex_gctx *g = c; return g->all || nvn_sparse_since(g->pool, a, n, g->vgen, g->stamp); }
+static int stex_changed(void *c, uint64_t a, uint64_t n) { stex_gctx *g = c; return g->all || nvn_sparse_since(g->pool, a, n, g->vgen, g->stamp, NULL); }
 static void stex_copy(void *c, void *dst, uint64_t a, uint64_t n) { nvn_sparse_copy(((stex_gctx *)c)->pool, dst, a, n); }
 static uint64_t stex_backing(void *c, uint64_t a) { uint64_t nvn_sparse_backing(const void *, uint64_t); return nvn_sparse_backing(((stex_gctx *)c)->pool, a); }
 // Staging the CPU writes: shared, retired with the upload batch as the whole-texture CPU path's (up_alloc's blocks are GPU-private)
@@ -2816,7 +2817,14 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             uint64_t now = nvn_dirty_now();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
             int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
-            if (pk->sparse) { uint64_t g = nvn_sparse_gen(); clean = (now == pk->seen && g == pk->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp); pk->vseen = g; }
+            if (pk->sparse) { uint64_t g = nvn_sparse_gen();
+                // A walk of the page table on every binding cost 7% of the submit thread in a Mario Kart World race (its 8192x8192x68 arrays, nvn_sparse_since in a sample at
+                // frame ~6,900). With no mapping changed since the last clean walk the runs are the same, so the one range they lie in tells whether any of them was written since
+                // the stamp: sound as the stamp is (pages protected after it fault on a write, which stamps the range)
+                if (now == pk->seen && g == pk->vseen) clean = 1;
+                else if (pk->vone && g == pk->vone_gen && !nvn_dirty_range_since(pk->vone, pk->stamp)) clean = 1;
+                else { const void *one = NULL; clean = !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp, &one); pk->vone = clean ? one : NULL; pk->vone_gen = g; }
+                pk->vseen = g; }
             pk->seen = now;
             int lost = 0;
             if (clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) { clean = 0; lost = 1; uint64_t k = atomic_load(&g_up_lost_redo); if (k <= 3 || !atomic_load(&g_up_lost_n)) MLOG("re-uploading a texture whose upload was dropped ser=%llu (%llu in total, %d left in the record)", (unsigned long long)t->serial, (unsigned long long)k, atomic_load(&g_up_lost_n)); }

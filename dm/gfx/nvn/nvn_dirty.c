@@ -218,6 +218,11 @@ int nvn_dirty_since_keep(const void **span, const void *addr, size_t len, uint64
     range_t *r = kept(*span, (uintptr_t)addr, len); if (r) *span = r;
     return since(r, (uintptr_t)addr, len, stamp);
 }
+// Whether any page of a kept range was written since the stamp (its newest generation), without its pages; a range no longer live counts as written
+int nvn_dirty_range_since(const void *span, uint64_t stamp) {
+    range_t *r = (range_t *)span;
+    return !r || !atomic_load_explicit(&r->live, memory_order_acquire) || atomic_load(&r->last) > stamp;
+}
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
