@@ -2637,20 +2637,32 @@ static int tex_from_storage(const tex_t *t) {
 // it is made CPU-written, uploaded now and re-uploaded when its pages change. A one-time fill (tex_init_fill) is not enough: that GPU texture goes into the sharing table (g_alias),
 // and a new texture object over the same storage with the same description gets it back after the CPU has rewritten the storage. The Great Ace Attorney Chronicles (Japanese release
 // 0100D7F00FB1A000, GitHub issue #568) decodes its court-record pictures (256x256 to 2048x2048 BC1, a CPU_CACHED pool, no flush) into storage it reuses, building a new texture over
-// it for each item: they were black, and once filled once, showed the previous item's picture. Uncompressed textures cannot be told from render targets (NVN has no flag for that,
-// so tex_desc gives them render-target use) and keep the flushed-range fill. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
-static int tex_cpu_content(const tex_t *t) {
+// it for each item: they were black, and once filled once, showed the previous item's picture. On Switch 1, uncompressed textures cannot be told from render targets (NVN has no flag
+// for that, so tex_desc gives them render-target use) and keep the flushed-range fill.
+// Switch 2 (NVN2) memory is coherent: the driver's FlushMappedRange / FlushTexels are bare returns (docs/reference/nvn2.md), so the GPU reads what the CPU stored, flushed or not, and
+// a texture first used as a sampled texture (sampled: its first resolution comes from a texture ID binding, tex_by_id) that the GPU has not written holds what its storage holds,
+// whatever its format. So on NVN2 an uncompressed texture is taken from its storage too when its first use is a sample, unless the sharing table already holds a GPU texture over the
+// same storage (a render target drawn through another texture object, which a sample must see). Mario Kart World stores its terrain tiles (260x260 R16 height, RG8 material, RGBA8
+// and R11G11B10F colour, 68x68 RGBA16; MINIMAL_LAYOUT, one CPU_CACHED pool) into reused slots before nvnTextureInitialize and never flushes them: as GPU textures of zeros the ground
+// came out flat and untextured and the beach had no sea. A texture first used as an attachment, a copy destination or an image stays a GPU texture.
+// DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
+static int tex_cpu_content(const tex_t *t, int sampled) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
-    if (!on || !t->mem || !t->pool || t->has_layout || !fmt_compressed(t->d.format) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    int bc = fmt_compressed(t->d.format), nvn2 = DM_GAME_SWITCH2 && sampled && !(t->d.format >= NVN_FORMAT_STENCIL8 && t->d.format <= NVN_FORMAT_DEPTH32F_STENCIL8);
+    if (!on || !t->mem || !t->pool || t->has_layout || !(bc || nvn2) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
     if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
+    if (!bc) { alias_key ak; alias_key_of(t, &ak); pthread_mutex_lock(&g_smu); int shared = hm_get_id(&g_alias, &ak) != nil; pthread_mutex_unlock(&g_smu); if (shared) return 0; }
     if (!mem_any(t->mem, t->L.size)) return 0;
-    static uint64_t n; if (n++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
-                                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->pool->flags, (unsigned long long)n);
+    static uint64_t n[2]; if (n[!bc]++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x pool flags %#x: uploaded from its storage, re-uploaded when it changes (%s, %llu so far)",
+                                                 (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->pool->flags, bc ? "block-compressed" : "NVN2, sampled first", (unsigned long long)n[!bc]);
     return 1;
 }
+// The first resolution of a texture for a texture ID binding (tex_by_id) is a sample (tex_cpu_content); tex_mtl_ takes the flag on entry, so nothing it resolves in turn inherits it
+static _Thread_local int g_res_sampled;
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
+static id<MTLTexture> tex_mtl_sampled(const tex_t *ct) { g_res_sampled = 1; id<MTLTexture> r = tex_mtl(ct); g_res_sampled = 0; return r; }
 // A sparse texture is bound from its first level whose pages, and those of every smaller level, are all mapped: a view of levels [r, n) samples as with a minimum LOD of r.
 // The translator drops TEX's LOD clamp and residency predicate, so Monster Hunter Rise's streamed textures were sampled at levels it had not mapped yet; those read 0, which ASTC
 // decodes as its error colour (magenta clothes on the title screen). Single-layer 2D textures only; the view follows each upload, as the mappings change only with one
@@ -2813,7 +2825,7 @@ static void texlost_note(const tex_t *t) {
         for (int k = 0; k < nsh; k++) if (sh[k].nz_n) MLOG("TEXLOST shape %ux%ux%u format %#x flags %#x levels %u: %llu first uses, %llu with data", sh[k].w, sh[k].h, sh[k].d, sh[k].fmt, sh[k].flags, sh[k].levels, (unsigned long long)sh[k].n, (unsigned long long)sh[k].nz_n); }
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
-    tex_t *t = (tex_t *)ct;
+    tex_t *t = (tex_t *)ct; int sampled = g_res_sampled; g_res_sampled = 0;   // see tex_mtl_sampled
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "texture object no longer valid (magic %#x, first case ser=%llu): no MTLTexture created", t->magic, (unsigned long long)t->serial); return nil; }
     int packaged = tex_from_storage(t);
@@ -2837,7 +2849,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     }
     id have = tex_get(t->serial);
     if (!packaged && !have && DM_GAME_TEX_DIRTY_UPLOAD && t->mem && on_sub_thread()) { int nvn_ft_written(const tex_t *); packaged = nvn_ft_written(t); }   // first use of a texture the CPU wrote since init without a flush (hle_nvn.c)
-    if (!packaged && !have && on_sub_thread() && tex_cpu_content(t)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
+    if (!packaged && !have && on_sub_thread() && tex_cpu_content(t, sampled)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
     { static int tl = -1; if (tl < 0) tl = getenv("DM_NVN_TEXLOST") != NULL; if (!packaged && !have && tl) texlost_note(t); }
     if (packaged) {
         NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
@@ -4682,12 +4694,12 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     // Before, every guest write to any protected page sent every texture ID, render targets included, down this path
     rp->view_pkg = (rp->t.has_layout || tex_cpu_written(rp->t.serial)) && rp->t.mem;
     if (v) {   // The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
-        id<MTLTexture> cur = tex_mtl(&rp->t);
+        id<MTLTexture> cur = tex_mtl_sampled(&rp->t);
         if (cur == v || v.parentTexture == cur) { rp->view_ser = sg; rp->view_dirty = dg; return v; }
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
     }
     treg_t r = *rp;
-    id<MTLTexture> base = tex_mtl(&rp->t);
+    id<MTLTexture> base = tex_mtl_sampled(&rp->t);
     if (!base) return nil;
     v = base;
     // Channel swizzle: the view's if set, otherwise the one from texture building; identity builds no view (SMBW's font cache is (1 1 1 R): without the swizzle glyphs become white blocks).
