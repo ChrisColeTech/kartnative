@@ -1,6 +1,6 @@
-# nxnative for Switch 2: Mario Kart World
+# kartnative
 
-A fork of [nxnative](https://github.com/seedds/nxnative) that runs **Mario Kart World 1.0.0** (Nintendo Switch 2) natively on an Apple silicon Mac. As upstream, it is not an emulator: the game's own code runs on the Mac's CPU, its graphics API (NVN2) is reimplemented on Metal, and its Switch 2 shaders (Ampere SM86 machine code) are translated to Metal offline. Bring your own decrypted dump; nothing from the game is in this repository.
+**kartnative** is a fork of [nxnative](https://github.com/seedds/nxnative) for the Nintendo Switch 2 that runs **Mario Kart World 1.0.0** natively on an Apple silicon Mac. As upstream, it is not an emulator: the game's own code runs on the Mac's CPU, its graphics API (NVN2) is reimplemented on Metal, and its Switch 2 shaders (Ampere SM86 machine code) are translated to Metal offline. Bring your own decrypted dump; nothing from the game is in this repository.
 
 <p align="center">
 <img src="docs/images/mario-kart-world-title.jpg" width="49%" alt="Mario Kart World's title screen running on a Mac">
