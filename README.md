@@ -340,3 +340,9 @@ nxnative started from **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)
 ### License
 
 MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).
+
+---
+
+# About this fork
+
+This fork is provided as is, without warranty of any kind. It will not be kept up to date with upstream nxnative, and issues and pull requests will not be reviewed or merged. You are free to fork it, copy it and take whatever you find useful from it, under the MIT license above.
