@@ -2488,7 +2488,7 @@ void nvn_sparse_census(uint64_t *virt_bytes, uint64_t *phys_bytes) {
     pthread_mutex_lock(&g_vp_mu);
     for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; if (v->pool->vmode != 2) continue;
         for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) if (v->pt[l]) for (unsigned i = 0; i < VPT_LEAF; i++) if (v->pt[l][i].phys) {
-            if (n == cap && !(ph = realloc(ph, (cap = cap ? 2 * cap : 65536) * sizeof *ph))) die("sparse census allocation failed");
+            if (n == cap) { uintptr_t *grown = realloc(ph, (cap = cap ? 2 * cap : 65536) * sizeof *ph); if (!grown) die("sparse census allocation failed"); ph = grown; }
             ph[n++] = (uintptr_t)v->pt[l][i].phys; } }
     pthread_mutex_unlock(&g_vp_mu);
     qsort(ph, n, sizeof *ph, cmp_ptr);

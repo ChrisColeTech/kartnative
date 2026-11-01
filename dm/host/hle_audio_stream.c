@@ -51,12 +51,12 @@ HLE_FORCE("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE",
 // VirtualDeviceProperties (sdk+0x1ed640): the device name (0x100 bytes), then a u64 at +0x100 and a u32 at +0x108 from the device's profile, whose meaning is not known; the game reads neither
 HLE_FORCE("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "virtual output device properties: the host's device (no devmgr)",
           Result, h_os_DevProps, uint8_t *p, const char *name) {
-    if (strncmp(name, OS_NAME, 0x100)) { LOG("[RED] audio: properties of virtual output device \"%.32s\", which the host does not have", name); return 0x299; }   // the SDK's result for an unknown device
+    if (strncmp(name, OS_NAME, sizeof OS_NAME)) { LOG("[RED] audio: properties of virtual output device \"%.32s\", which the host does not have", name); return 0x299; }   // the SDK's result for an unknown device
     memset(p, 0, 0x110); strcpy((char *)p, OS_NAME);
     return RES_OK;
 }
 static Result os_open(void *t, void *ev, const char *name, const stream_format *f, int cap, int threshold, uint32_t flags) {
-    if (strncmp(name, OS_NAME, 0x100)) { LOG("[RED] audio: output stream on virtual device \"%.32s\", which the host does not have", name); return 0x299; }
+    if (strncmp(name, OS_NAME, sizeof OS_NAME)) { LOG("[RED] audio: output stream on virtual device \"%.32s\", which the host does not have", name); return 0x299; }
     if (f->fmt != 2 || f->rate != 48000 || f->ch < 1 || f->ch > 6) { LOG("[RED] audio: output stream format %d, %d channels, %d Hz: the host plays PCM16 at 48 kHz", f->fmt, f->ch, f->rate); return 0x899; }
     if (objmap_get(t)) die("audio: output stream %p opened twice", t);
     ostream *s = calloc(1, sizeof *s); if (!s) die("audio: out of memory");

@@ -2751,7 +2751,11 @@ static id<MTLTexture> gstex_new(const tex_t *t) {
     objc_setAssociatedObject(mt, &g_gstex_key, o, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     res_add(mt);
     pthread_mutex_lock(&g_gstex_mu);
-    if (g_ngstex == g_cgstex) g_gstex = (NvGpuStex *__unsafe_unretained *)realloc(g_gstex, (size_t)(g_cgstex = g_cgstex ? 2 * g_cgstex : 16) * sizeof *g_gstex);
+    if (g_ngstex == g_cgstex) {
+        NvGpuStex *__unsafe_unretained *grown = (NvGpuStex *__unsafe_unretained *)realloc(g_gstex, (size_t)(g_cgstex ? 2 * g_cgstex : 16) * sizeof *g_gstex);
+        if (!grown) MDIE("GPU-written sparse texture table allocation failed");
+        g_gstex = grown; g_cgstex = g_cgstex ? 2 * g_cgstex : 16;
+    }
     g_gstex[g_ngstex++] = o;
     if (on_sub_thread()) gstex_sync(o);   // otherwise at the next submission's start
     pthread_mutex_unlock(&g_gstex_mu);

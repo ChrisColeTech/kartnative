@@ -42,8 +42,10 @@ int main(int argc,char **argv) { @autoreleasepool {
     CHECK(drawlib!=nil,"indirect-count consumer compiles");
     NvShader *consumer=[NvShader new];consumer->fn=[drawlib newFunctionWithName:@"v"];consumer->discard_fn=[drawlib newFunctionWithName:@"vd"];
     consumer->ae=[consumer->discard_fn newArgumentEncoderWithBufferIndex:0];consumer->rf.nb=1;consumer->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0};
+    // NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): serial_put retains the program in g_by_serial through hm_put_id's CFBridgingRetain
     NvProg *drawpr=[NvProg new];drawpr->sh[0]=consumer;static prog_t pg={.serial=910601};serial_put(pg.serial,drawpr);
     tex_t target={.magic=MAGIC('T','E','X',0),.serial=910602};target.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=1,.levels=1,.samples=1};
+    // NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
     memset(output,0,256);mtl_sub_begin();bind(output,100);state(0,ctl3);
     void *mb;uint64_t off,gpu;mtl_gpu_addr((uint64_t)args,4,&mb,&off,&gpu);
     void *sb;uint64_t so,sg;mtl_gpu_addr((uint64_t)source,4,&sb,&so,&sg);

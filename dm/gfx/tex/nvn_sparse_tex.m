@@ -116,10 +116,12 @@ static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, i
         hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)HEAP_PAGES * TILE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
         fresh = g_nheaps < 0x8000 ? [dev newHeapWithDescriptor:hd] : nil;
         if (!fresh) { pthread_mutex_unlock(&g_mu); return -1; }
-        sheap *hp = calloc(1, sizeof *hp); hp->heap = (__bridge_retained void *)fresh;
+        sheap *hp = calloc(1, sizeof *hp), **grown = hp ? realloc(g_heaps, sizeof *g_heaps * (g_nheaps + 1)) : NULL;
+        if (!grown) { free(hp); pthread_mutex_unlock(&g_mu); return -1; }   // fresh goes with ARC, as a heap Metal did not give
+        g_heaps = grown; hp->heap = (__bridge_retained void *)fresh;
         for (unsigned k = 0; k < HEAP_PAGES; k++) hp->free[k] = (uint16_t)(HEAP_PAGES - 1 - k);   // pops 0, 1, 2, …
         hp->nfree = HEAP_PAGES - 1;                                                                // page 0 is this call's
-        g_heaps = realloc(g_heaps, sizeof *g_heaps * (g_nheaps + 1)); g_heaps[g_nheaps] = hp;
+        g_heaps[g_nheaps] = hp;
         p = (int)(g_nheaps++ << 16);
     }
     sheap *hp = g_heaps[p >> 16]; hp->ref[p & 0xffff] = 1; hp->key[p & 0xffff] = key;
@@ -138,7 +140,7 @@ static void page_free(int p) {   // one tile less on the page; the last one free
 typedef struct { MTL4UpdateSparseTextureMappingOperation op; int heap; } mapop;   // heap -1: an unmap
 typedef struct { mapop *v; size_t n, cap; } oplist;
 static void op_add(oplist *o, int map, MTLRegion r, unsigned lv, unsigned z, int page) {
-    if (o->n == o->cap) o->v = realloc(o->v, sizeof *o->v * (o->cap = o->cap ? o->cap * 2 : 256));
+    if (o->n == o->cap) { mapop *v = realloc(o->v, sizeof *o->v * (o->cap = o->cap ? o->cap * 2 : 256)); if (!v) abort(); o->v = v; }
     o->v[o->n++] = (mapop){{map ? MTLSparseTextureMappingModeMap : MTLSparseTextureMappingModeUnmap, r, lv, z, map ? (NSUInteger)(page & 0xffff) : 0}, map ? page >> 16 : -1};
 }
 static int op_cmp(const void *a, const void *b) { return ((const mapop *)a)->heap - ((const mapop *)b)->heap; }
@@ -213,7 +215,9 @@ static size_t up_bytes(const nvn_stex *s, unsigned lv) {   // staging for one en
 int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest *g, const nvn_stex_host *h, uint64_t budget) {
     if (!s || !q || !g || !h) return -1;
     id<MTLTexture> t = (__bridge id<MTLTexture>)s->tex;
-    size_t ne = (size_t)s->per_slice * s->slices; oplist o = {0}; int fail = 0;
+    const unsigned per = s->per_slice;   // entries per layer, at least one (a tile or the mip tail); kept so the entry index splits into layer and entry below
+    if (!per) return 0;
+    size_t ne = (size_t)per * s->slices; oplist o = {0}; int fail = 0;
     for (unsigned z = 0; z < s->slices; z++) for (unsigned k = 0; k < s->per_slice; k++) {
         ent *e = &s->e[(size_t)z * s->per_slice + k];
         uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, k, &a, &n, &lv, &x, &y);
@@ -237,7 +241,7 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
     for (; last < ne; last++) {
         if (!s->e[last].dirty) continue;
         if (budget && bytes >= budget) break;
-        uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, (unsigned)(last / s->per_slice), (unsigned)(last % s->per_slice), &a, &n, &lv, &x, &y);
+        uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, (unsigned)(last / per), (unsigned)(last % per), &a, &n, &lv, &x, &y);
         total += up_bytes(s, lv); bytes += n;
     }
     s->pending = 0; for (size_t i = last; i < ne && !s->pending; i++) s->pending = s->e[i].dirty;
@@ -248,7 +252,7 @@ int64_t nvn_stex_sync(nvn_stex *s, id<MTL4CommandQueue> q, const nvn_stex_guest 
     cp *cps = malloc(sizeof *cps * (total / 256 + 1)); size_t ncp = 0, at = base; uint8_t *tmp = NULL; uint64_t tmp_n = 0;
     for (size_t i = 0; i < last; i++) {
         ent *e = &s->e[i]; if (!e->dirty) continue;
-        unsigned z = (unsigned)(i / s->per_slice); uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, (unsigned)(i % s->per_slice), &a, &n, &lv, &x, &y);
+        unsigned z = (unsigned)(i / per); uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, (unsigned)(i % per), &a, &n, &lv, &x, &y);
         if (!s->gpu) { if (n > tmp_n) { free(tmp); tmp = malloc(n); tmp_n = n; } g->copy(g->ctx, tmp, g->base + a, n); }
         for (unsigned l = lv; l < (lv < s->tiled ? lv + 1 : s->levels); l++) {   // a tile, or every level of the mip tail
             cp c = {at, 0, 0, {0}, {0}, z, l}; up_geom(s, lv, x, y, l, &c.o, &c.sz, &c.pitch, &c.bytes);

@@ -20,7 +20,7 @@ static void fill(tex_t *t, uint32_t rgba) {   // every texel of level 0 = rgba (
 static uint32_t probe(id<MTLTexture> image) {   // texel (5, 7) as RGBA8 bytes
     static id<MTLComputePipelineState> ps; static id<MTLCommandQueue> queue; NSError *error = nil;
     if (!ps) { id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;kernel void rd(texture2d<float> t[[texture(0)]],device uint *o[[buffer(0)]]){float4 c=t.read(uint2(5,7));o[0]=uint(round(c.r*255))|uint(round(c.g*255))<<8|uint(round(c.b*255))<<16|uint(round(c.a*255))<<24;}" options:nil error:&error];
-        ps = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"rd"] error:&error]; queue = [g_dev newCommandQueue]; }
+        id<MTLFunction> rd = [lib newFunctionWithName:@"rd"]; ps = rd ? [g_dev newComputePipelineStateWithFunction:rd error:&error] : nil; queue = [g_dev newCommandQueue]; }
     CHECK("probe compiles", ps != nil); if (!ps || !image) return 0xdeadbeef;
     id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
