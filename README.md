@@ -24,7 +24,7 @@
 
 ## Play it on a Mac
 
-1. Install the tools as upstream does ([Build from the command line](#build-from-the-command-line), step 1).
+1. Clone this repository, `git clone https://github.com/pahorema/kartnative.git && cd kartnative`, and install the tools of upstream's [step 1](#build-from-the-command-line) (Xcode's Metal toolchain, the Homebrew packages, .NET and the Python packages), skipping its clone of nxnative.
 2. Put the dump in one folder, `MarioKartWorld/exefs/` (`main`, `main.npdm`, `sdk`, `subsdk0`) and `MarioKartWorld/romfs/`.
 3. Build for the Mac. The first build translates the game's ~11,600 shaders, about 30 minutes; later builds reuse them. `--allow-other-metal` is needed when your Metal compiler is not the one in `dm/gfx/tools/dmsh_chain.lock`:
 
