@@ -17,6 +17,11 @@ switch2	on
 # replay, as on the GPU; drawn anyway, two clears wiped the lit scene after its pass, so only the sky drawn later stayed (Nvn2Render, run pd5, frame 4000)
 render_cond	on
 
+# ---- Frame rate ----
+# The main thread waits every frame on the fence of the frame the Presentation Thread just submitted (main+0x25ec5a0, after the acquire sync at +0x25ec58c), so the frame is
+# that submission's encoding plus the GPU's tail. Encoding on its own thread took the race's submit from 7.4 to 5.9 ms a frame (p50, Mac headless, PerfReplay runs ab1 / enc1)
+enc_thread	on
+
 # ---- Versions ----
 build	v0	1.0.0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
 package	v0
