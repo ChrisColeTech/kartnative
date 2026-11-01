@@ -174,6 +174,23 @@ static void alias_lifecycle(void) {
     assert(pages(1, UINTPTR_MAX - P + 1, 2 * P) == BAD);
     assert(pages(1, alias + g_alias_cap - P, 2 * P) == BAD);
 }
+// UnmapPhysicalMemory hands its pages back to the system, including when the range covers pages never mapped; the next map reads zeros. A Switch 2 build
+// (t_svc_memory_switch2) releases them with MADV_FREE_REUSABLE, which also drops pages the system compressed (not forced here), a Switch 1 build with MADV_FREE
+static uint64_t footprint_bytes(void) {
+    task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
+    assert(task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) == KERN_SUCCESS); return vi.phys_footprint;
+}
+static void unmap_releases(void) {
+    size_t n = 8u << 20;
+    assert(!pages(1, alias, n)); memset((void *)alias, 0x5a, n);
+    uint64_t before = footprint_bytes();
+    assert(!pages(0, alias + P, 2 * n - P));   // the first 4 KB page stays mapped, and the range runs past what was mapped
+    assert(footprint_bytes() + n / 2 <= before);
+    assert(*(uint8_t *)alias == 0x5a);
+    assert(!pages(1, alias + P, n - P));
+    for (size_t i = P; i < n; i += 997) assert(((uint8_t *)alias)[i] == 0);
+    assert(*(uint8_t *)alias == 0x5a && !pages(0, alias, n) && !g_alias_mapped);
+}
 
 static void ownership(void) {
     assert(!pages(1, alias, 16 * P));
@@ -489,7 +506,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); unmap_releases(); ownership(); module_sources(); module_back_patch(); failures(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

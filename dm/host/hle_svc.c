@@ -216,6 +216,25 @@ static void alias_initialize(uint64_t off, size_t size) {
     for (uint64_t h = off / pg, last = (off + size - 1) / pg; h <= last; ++h)
         g_alias_exposed[h >> 6] |= UINT64_C(1) << (h & 63);
 }
+// UnmapPhysicalMemory gives the pages back to the system, as Horizon returns them to the pool. [lo, hi) is whole host pages, all of them leaving the alias region; called with
+// the commit bitmap still as before the unmap. Darwin's MADV_FREE drops resident pages but leaves the ones the system had compressed charged to the process (measured in a test
+// program: after half of a 1 GB range with 246 MB compressed was released, all 246 MB stayed), so a game that frees and maps again stayed charged for what it had mapped before:
+// Mario Kart World's guest memory outside the heap was charged 3.26 GB with 1.25 GB mapped. MADV_FREE_REUSABLE (what Darwin's malloc uses) takes both back, but only from
+// writable pages, so it comes before the range is protected, run by run over the host pages that were mapped (the SDK may unmap pages it never mapped, which are not writable);
+// MADV_FREE_REUSE at the next map undoes it. Where it is refused, MADV_FREE does what it can. A general fix (Horizon gives every game's unmapped pages back), gated to Switch 2
+// builds until a Switch 1 regression run confirms it; Switch 1 builds keep mprotect + MADV_FREE
+static void alias_release(uintptr_t lo, uintptr_t hi) {
+    uintptr_t pg = (uintptr_t)getpagesize(), base = (uintptr_t)g_alias;
+    #define WRITABLE(h) ((uint64_t)alias_unmapped((h) - base, pg) < pg / 4096)   // some 4 KB page of the host page is mapped
+    for (uintptr_t h = lo; h < hi; ) {
+        if (!WRITABLE(h)) { h += pg; continue; }
+        uintptr_t e = h + pg;
+        while (e < hi && WRITABLE(e)) e += pg;
+        if (madvise((void *)h, e - h, MADV_FREE_REUSABLE)) (void)madvise((void *)h, e - h, MADV_FREE);
+        h = e;
+    }
+    #undef WRITABLE
+}
 
 static int memory_contains(uint64_t base, uint64_t capacity, uint64_t addr, uint64_t size) {
     return addr >= base && size <= capacity && addr - base <= capacity - size;
@@ -635,10 +654,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
         if (changed && mhi > mlo) {
+            if (!commit && DM_GAME_SWITCH2) alias_release(mlo, mhi);
             if (mprotect((void *)mlo, mhi - mlo, commit ? PROT_READ | PROT_WRITE : PROT_NONE))
                 die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
-            if (commit) dm_guest_write_prepare((void *)mlo, mhi - mlo);
-            else (void)madvise((void *)mlo, mhi - mlo, MADV_FREE);
+            if (commit) { if (DM_GAME_SWITCH2) (void)madvise((void *)mlo, mhi - mlo, MADV_FREE_REUSE); dm_guest_write_prepare((void *)mlo, mhi - mlo); }
+            else if (!DM_GAME_SWITCH2) (void)madvise((void *)mlo, mhi - mlo, MADV_FREE);
         }
         if (commit && changed) alias_initialize(off, size);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);
