@@ -1044,6 +1044,15 @@ def fs_uint(src):
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, or nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target)
     from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
+    # or a copy of a flat input component, straight or through a float temporary: interpolation-free bits the vertex or mesh stage wrote (Mario Kart World's 286d21df3059403a
+    # writes the mesh program's per-primitive ID into an R8Uint target: out.m_19.x = in.m_16.x)
+    ins = re.search(r'struct main0_in\s*\{(.*?)\};', src, re.S)
+    flat = {nm for nm in re.findall(r'^\s*\w+\s+(\w+)\s*\[\[[^\]]*\bflat\b[^\]]*\]\];', ins.group(1), re.M)} if ins else set()
+    if flat:
+        fl = r'in\.(?:%s)\.[xyzw]' % '|'.join(map(re.escape, flat))
+        tmp = set(re.findall(r'\bfloat (\w+) = %s;' % fl, src))
+        src_re = fl + (r'|(?:%s)\b' % '|'.join(map(re.escape, tmp)) if tmp else '')
+        from_int |= {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = (?:%s);' % (nm, src_re), src)}
     writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
     if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
