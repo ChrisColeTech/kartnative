@@ -119,10 +119,11 @@ int main(void) { @autoreleasepool {
         res_add(big);res_commit();
         const int W=4*N,H=2*N;MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
         od.storageMode=MTLStorageModePrivate;od.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;id<MTLTexture> out=[g_dev newTextureWithDescriptor:od];
-        const int crops[4][4]={{0},{8,8,48,48},{8,8,48,48},{8,8,48,48}};
-        for (int mode=0;mode<4;mode++) {
-            g_fx_mode=mode==3?0:1;atomic_store(&g_origin_ll,mode==2);
-            EXPECT("offscreen present reports the scaler actually used",mode==3?PRESENT_STANDARD:PRESENT_METALFX,present_offscreen_wait(big,crops[mode],out));
+        const int crops[5][4]={{0},{8,8,48,48},{8,8,48,48},{8,8,48,48},{8,8,48,48}};
+        for (int mode=0;mode<5;mode++) {   // 3: MetalFX off; 4: MetalFX on, the bilinear pass asked for (the DM_NVN_SHOT_OUT companion picture)
+            g_fx_mode=mode==3?0:1;atomic_store(&g_origin_ll,mode==2);double ms=-1;
+            EXPECT("offscreen present reports the scaler actually used",mode>=3?PRESENT_STANDARD:PRESENT_METALFX,present_offscreen_wait(big,crops[mode],out,mode==4,&ms));
+            EXPECT("  and its GPU time",1,ms>0&&ms<1000);
             id<MTLBuffer> rb=[g_dev newBufferWithLength:W*H*4 options:MTLResourceStorageModeShared];id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
             [bl copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(W,H,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W*4 destinationBytesPerImage:W*H*4];
             [bl endEncoding];[cb commit];[cb waitUntilCompleted];
@@ -140,8 +141,8 @@ int main(void) { @autoreleasepool {
         MTLTextureDescriptor *smallD=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:32 height:32 mipmapped:NO];
         smallD.storageMode=MTLStorageModePrivate;smallD.usage=MTLTextureUsageRenderTarget;
         id<MTLTexture> small=[g_dev newTextureWithDescriptor:smallD];int whole[4]={0},invalidCrop[4]={63,0,2,2};
-        EXPECT("MetalFX requested but downscaling uses standard",PRESENT_STANDARD,present_offscreen_wait(big,whole,small));
-        EXPECT("offscreen rejects an invalid crop before submission",PRESENT_FAILED,present_offscreen_wait(big,invalidCrop,out));
+        EXPECT("MetalFX requested but downscaling uses standard",PRESENT_STANDARD,present_offscreen_wait(big,whole,small,0,NULL));
+        EXPECT("offscreen rejects an invalid crop before submission",PRESENT_FAILED,present_offscreen_wait(big,invalidCrop,out,0,NULL));
 
         uint64_t savedPresent=g_present_n;g_present_n=1;
         EXPECT("initial present makes its scaler",PRESENT_METALFX,check_present_resize(big,W,H));

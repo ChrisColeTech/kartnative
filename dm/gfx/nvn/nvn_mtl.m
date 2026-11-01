@@ -11077,8 +11077,8 @@ static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static in
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);
 enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX };
-static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int));
-static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out);
+static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, int bilinear, void (^done)(int kind, double gpu_s));
+static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, int bilinear, double *gpu_ms);
 // Game picture needed by the whole-window screenshot (front end window_shot; no longer does drawViewHierarchy on a Metal layer with the display link attached): at the next present, the present thread draws the same frame
 // with the same encoding as the present into an offscreen texture of the view's size, and after the GPU finishes hands out a CGImage in the completion callback. Guarded by g_shotq_mu
 static void (^g_grab_cb)(CGImageRef img);
@@ -11092,7 +11092,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     id<MTLTexture> out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; id<MTLBuffer> buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil;
     if (!buf) { MLOG("[RED] full-window screenshot: cannot create output (%zux%zu)", w, h); cb(NULL); return; }
     // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion.
-    void (^readback)(int) = ^(int ok) {
+    void (^readback)(int, double) = ^(int ok, double gpu_s) { (void)gpu_s;
         if (!ok) { cb(NULL); return; }
         id<MTLCommandBuffer> cb2 = q_cb(); id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
         [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
@@ -11104,11 +11104,11 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
             CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); }];
         [cb2 commit];
     };
-    if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) cb(NULL); }
+    if (g_q4) { if (!present_offscreen_m4(src, crop, out, 0, readback)) cb(NULL); }
     else {
         id<MTLCommandBuffer> draw = q_cb();
         if (!present_encode(draw, src, out, crop)) { cb(NULL); return; }
-        [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { readback(c.status == MTLCommandBufferStatusCompleted); }]; [draw commit];
+        [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { readback(c.status == MTLCommandBufferStatusCompleted, 0); }]; [draw commit];
     }
 }
 void dm_gfx_shot_at(long k, const char *path) {
@@ -11117,27 +11117,10 @@ void dm_gfx_shot_at(long k, const char *path) {
     else MLOG("[RED] more than %d screenshot requests; dropping %s", SHOTQ_MAX, path);
     pthread_mutex_unlock(&g_shotq_mu);
 }
-// DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by the present pass", i.e. the picture the player sees on a screen
-// of that size (with DM_PRESENT_UPSCALE=metalfx through MetalFX, on the Metal 4 queue: present_offscreen_m4); screen=0 (texture dump) is unaffected
-static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
-    static int out_w = -1, out_h;
-    if (out_w < 0) {
-        out_w = 0;
-        const char *e = getenv("DM_NVN_SHOT_OUT"); int w = 0, h = 0; char sep = 0, extra = 0;
-        if (e && sscanf(e, "%d%c%d%c", &w, &sep, &h, &extra) == 3 && sep == 'x' && w > 0 && h > 0) { out_w = w; out_h = h; }
-    }
-    id<MTLTexture> read = src;
-    if (out_w && screen) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:out_w height:out_h mipmapped:NO];
-        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
-        if (!out) { MLOG("[RED] cannot create the screenshot output texture %dx%d", out_w, out_h); return; }
-        if (g_q4) { if (!present_offscreen_wait(src, crop, out)) return; }
-        else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; }
-        read = out;
-    }
+// Writes the 8-bit colour texture read as a PNG at path (flip: the window image is stored bottom-up); returns whether it was written
+static int shot_save(id<MTLTexture> read, const char *path, int flip) {
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
-        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
+        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return 0; }
     size_t w = read.width, h = read.height, row = w * 4;
     id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb();
@@ -11145,7 +11128,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     [b copyFromTexture:read sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
     [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
-    if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
+    if (flip) {
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
     int bgra = read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
@@ -11161,6 +11144,36 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     else { CGImageDestinationAddImage(dst, img, NULL); ok = CGImageDestinationFinalize(dst); }
     if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
     MLOG("screenshot %zux%zu format %lu → %s %s", w, h, (unsigned long)read.pixelFormat, path, ok ? "ok" : "failed");
+    return ok;
+}
+// DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by the present pass", i.e. the picture the player sees on a screen
+// of that size (with DM_PRESENT_UPSCALE=metalfx through MetalFX, on the Metal 4 queue: present_offscreen_m4); screen=0 (texture dump) is unaffected. Through MetalFX, the same frame is also
+// written through the bilinear pass as <path>.bilinear.png, and the log line gives both present command buffers' GPU times: the two pictures and costs at one frame
+static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
+    static int out_w = -1, out_h;
+    if (out_w < 0) {
+        out_w = 0;
+        const char *e = getenv("DM_NVN_SHOT_OUT"); int w = 0, h = 0; char sep = 0, extra = 0;
+        if (e && sscanf(e, "%d%c%d%c", &w, &sep, &h, &extra) == 3 && sep == 'x' && w > 0 && h > 0) { out_w = w; out_h = h; }
+    }
+    id<MTLTexture> read = src;
+    if (out_w && screen) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:out_w height:out_h mipmapped:NO];
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
+        if (!out) { MLOG("[RED] cannot create the screenshot output texture %dx%d", out_w, out_h); return; }
+        if (g_q4) { double ms = 0; int kind = present_offscreen_wait(src, crop, out, 0, &ms); if (!kind) return;
+            if (kind == PRESENT_METALFX) {
+                id<MTLTexture> bl = [g_dev newTextureWithDescriptor:d]; double bms = 0; char bp[1100];
+                const char *dot = strrchr(path, '.'); size_t stem = dot && !strchr(dot, '/') ? (size_t)(dot - path) : strlen(path);
+                snprintf(bp, sizeof bp, "%.*s.bilinear.png", (int)stem, path);
+                if (bl && present_offscreen_wait(src, crop, bl, 1, &bms)) shot_save(bl, bp, 0);
+                MLOG("screenshot through the present at %dx%d: MetalFX present command buffer GPU %.3f ms, bilinear %.3f ms", out_w, out_h, ms, bms);
+            } }
+        else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; }
+        read = out;
+    }
+    int ok = shot_save(read, path, screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed));   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
     if (g_defer_ab >= 0 && getenv("DM_NVN_DEFER_AB") && !strcmp(getenv("DM_NVN_DEFER_AB"), "1") && ok) { static int shots; if (++shots == 2) { g_defer_ab_on = 1; MLOG("DM_NVN_DEFER_AB: second screenshot written; deferred pass merging on"); } }
     if (g_udc_ab >= 0 && getenv("DM_NVN_UDC_AB") && !strcmp(getenv("DM_NVN_UDC_AB"), "1") && ok) {
         static int shots;
@@ -11550,9 +11563,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     m4_end(en);
     return up ? PRESENT_METALFX : PRESENT_STANDARD;
 }
-// The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included, on the Metal 4 queue;
-// returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
-static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
+// The present's picture drawn into an offscreen texture (out: private, render target) the way present_now draws it into the drawable, MetalFX included unless bilinear, on the Metal 4 queue;
+// returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error, and the command buffer's GPU time. Resources remain resident and retained until GPU completion.
+static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, int bilinear, void (^done)(int, double)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
     id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
@@ -11560,7 +11573,7 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
     fx_state fx = {0};
     res_add(out); res_add(uvb); res_commit();
     [cb beginCommandBufferWithAllocator:al];
-    int kind = present_encode_m4(cb, raw, out, crop, uvb, &fx);
+    int kind = present_encode_m4(cb, raw, out, crop, uvb, bilinear ? NULL : &fx);
     [cb endCommandBuffer];
     if (!kind) { res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out); return 0; }
     MTL4CommitOptions *options = [MTL4CommitOptions new];
@@ -11568,16 +11581,18 @@ static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTex
         (void)al; (void)cb; (void)raw; (void)fx.sc;   // keep the Metal 4 commands, source view and scaler alive too
         res_remove(out); res_remove(uvb); res_remove(fx.in); res_remove(fx.out);
         if (f.error) MLOG("[RED] offscreen present: %s", f.error.description.UTF8String);
-        done(f.error ? PRESENT_FAILED : kind);
+        done(f.error ? PRESENT_FAILED : kind, f.GPUEndTime - f.GPUStartTime);
     }];
     [g_q4 commit:&cb count:1 options:options];
     return 1;
 }
 // Diagnostic readback and tests wait for the same asynchronous capture used by whole-window screenshots. A timeout leaves cleanup with the GPU completion handler.
-static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out) {
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0); __block int kind = PRESENT_FAILED;
-    if (!present_offscreen_m4(src, crop, out, ^(int k) { kind = k; dispatch_semaphore_signal(sem); })) return 0;
+// gpu_ms (optional): the present command buffer's GPU time
+static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, int bilinear, double *gpu_ms) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0); __block int kind = PRESENT_FAILED; __block double gpu = 0;
+    if (!present_offscreen_m4(src, crop, out, bilinear, ^(int k, double s) { kind = k; gpu = s; dispatch_semaphore_signal(sem); })) return 0;
     if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) { MLOG("[RED] offscreen present: the GPU did not finish within 10 s"); return 0; }
+    if (gpu_ms) *gpu_ms = gpu * 1e3;
     return kind;
 }
 // The present command buffer's GPU time (its commit feedback: from its first to its last command, the MetalFX scaler and the present pass), every 600 presents as p50 / p95, apart
