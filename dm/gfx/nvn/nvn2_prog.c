@@ -69,8 +69,8 @@ static int prog2_refuse(const char *why, int i, const void *ctl) {
     return 0;
 }
 
-// Each distinct combination of stages a program has, logged the first time it is seen: the replay layer draws vertex / fragment / compute programs; task and
-// mesh programs (MKW: task + mesh + fragment) have no Metal pipeline yet, their stages are listed here for that work
+// Each distinct combination of stages a program has, logged the first time it is seen (MKW: vertex + fragment, compute, fragment + task + mesh, fragment + mesh; the
+// replay layer draws task / mesh programs as Metal mesh pipelines, nvn2_mesh.inc)
 static void prog2_note_stages(unsigned mask) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t seen[(1u << 8) / 64]; static unsigned ncomb;
     pthread_mutex_lock(&mu);
@@ -79,8 +79,7 @@ static void prog2_note_stages(unsigned mask) {
     pthread_mutex_unlock(&mu);
     if (!first) return;
     char s[96] = ""; for (int st = 0; st < 8; st++) if (mask >> st & 1) { if (s[0]) strlcat(s, " + ", sizeof s); strlcat(s, k_stage[st], sizeof s); }
-    if (mask & (3u << NVN2_SHADER_STAGE_TASK)) LOG("[RED] [nvn2] program stages %s (combination %u): mesh-shader programs are recorded but not drawn", s, ncomb);
-    else LOG("[nvn2] program stages %s (combination %u)", s, ncomb);
+    LOG("[nvn2] program stages %s (combination %u)", s, ncomb);
 }
 
 // Checks the stages as the driver does (nvn2.md, "SetShaders core" step 3), then hands plain {code, control} records to the NVN1 program, which keys each stage.
