@@ -292,6 +292,13 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_sparse_tex` (dm/gfx/tex/tests): a sparse RGBA8 array whose fake guest maps some tiles reads back the guest's texels in mapped tiles and mip tails and 0 elsewhere, with both GOB variants; a written tile is uploaded again and an unmapped one reads 0 again; MKW's 8192×8192×68 ASTC 8×8 shape is created with +0.3 MB allocated and 17 mapped tiles add 1.1 MB of tiles (+8 MB device allocation), not 1.45 GB.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). A 60 s run with `DM_NVN_ALLOCPROF=1`: the frame that creates the 45 streamed textures uploads 905.8 MB (8,835.3 MB before), no `Insufficient Memory`, `GPU allocated` steady near 9.8 GB.
 
+### sRGB and linear texture objects over one storage
+
+- **Symptom:** a picture the game renders every frame shows only its first content where it is sampled: a movie frozen on its first frame (or showing the scene before it), while the pass dump shows the target drawn each frame and its source changing (`C … sum` differs per frame).
+- **Cause:** NVN texture objects are descriptors; a game may render into an RGBA8 object and sample an RGBA8_SRGB object made over the same memory. The replay's sharing table (`g_alias` in `nvn_mtl.m`) keyed on the whole description, format included, so the two were separate Metal textures: the sampled one was filled once from storage and never saw the draws into the other.
+- **Fix:** the key takes an sRGB format and its linear twin (the pairs Metal views without `PixelFormatView`, `g_pfv_srgb`) as one (`alias_fmt`), and the second object gets a view of the first in its own format. Switch 2 builds only for now; Switch 1 games keep their tested path.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): each cup-movie frame is drawn from its NV12 planes into ser 31344 (RGBA8, format 0x25) and sampled through ser 31345 (RGBA8_SRGB, 0x38) at the same pool offset (`DM_NVN_TEXINFO=2560x1440`); the movie froze with `tex_flush_upload` and `tex_dirty_upload` on and now plays (shots at frames 4300 / 4600 / 4900 / 5200 all differ).
+
 ### Minimal texture layouts
 
 - **Symptom:** huge stretched terrain walls and ceilings, flickering, while characters and the HUD are right: `WriteTexels` into a texture overwrote the mesh data stored right after it.
