@@ -1636,6 +1636,20 @@ static int tex_need_pfv(MTLPixelFormat base, MTLPixelFormat view) {
         if ((base == g_pfv_srgb[i].a && view == g_pfv_srgb[i].b) || (base == g_pfv_srgb[i].b && view == g_pfv_srgb[i].a)) return 0;
     return 1;
 }
+// The NVN format two texture objects over one storage share a Metal texture under (the sharing table below): an sRGB format and its linear twin (g_pfv_srgb) map to the lower of
+// the two NVN formats, so a render target written as RGBA8 and sampled through an RGBA8_SRGB object over the same memory are one texture, the second a view of the first. Mario
+// Kart World draws each cup movie frame into an RGBA8 target and samples it through an RGBA8_SRGB object: as two Metal textures, the sampled one never changed (the movie froze)
+static uint32_t alias_fmt(uint32_t f) {
+    enum { NF = 0x400 }; static uint16_t canon[NF]; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        uint32_t lin[NF];   // each format's Metal format with sRGB taken off (0: none / not an sRGB pair)
+        for (uint32_t i = 0; i < NF; i++) { canon[i] = (uint16_t)i; lin[i] = 0; uint32_t pf = 0; uint8_t swz[4];
+            if (!nvn_fmt_to_mtl((int)i, &pf, swz) || !pf) continue;
+            for (size_t k = 0; k < sizeof g_pfv_srgb / sizeof *g_pfv_srgb; k++) if (pf == g_pfv_srgb[k].a || pf == g_pfv_srgb[k].b) lin[i] = (uint32_t)g_pfv_srgb[k].a;
+            if (lin[i]) for (uint32_t j = 0; j < i; j++) if (lin[j] == lin[i]) { canon[i] = canon[j]; break; } }
+    });
+    return f < NF && DM_GAME_SWITCH2 ? canon[f] : f;   // Switch 2 only for now: Switch 1 games keep their tested path
+}
 // Cache tables on the replay hot path always use nvn_hmap (C hash, keys not boxed); the table stores CFBridgingRetain'ed objects, CFRelease'd on replace / delete
 static void hm_rel(void *v) { CFRelease(v); }
 static __unsafe_unretained id hm_get_id(const nvn_hmap *m, const void *k) { return (__bridge id)nvn_hm_get(m, k); }
@@ -2773,8 +2787,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     // IMAGE permits shader writes; it does not change storage. Xenoblade Chronicles 3's depth and stencil-sampling objects differ only by this flag. Separate Metal textures
     // made the stencil read zero and rejected every deferred-lighting pass. Actual image writes add Metal usage before opening their encoder (image_prepare).
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+    // An sRGB format and its linear twin read the same bytes: two objects over one storage that differ only so are one texture, the second a view of the first (alias_fmt)
+    ak.d.format = alias_fmt(ak.d.format);
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
-    if (shared) { tex_put(t->serial, shared); return shared; }
+    if (shared) {
+        uint32_t pf = 0; uint8_t swz[4]; id<MTLTexture> st = shared;
+        if (nvn_fmt_to_mtl(t->d.format, &pf, swz) && pf && pf != (uint32_t)st.pixelFormat && !tex_need_pfv(st.pixelFormat, (MTLPixelFormat)pf)) {
+            id<MTLTexture> v = [st newTextureViewWithPixelFormat:(MTLPixelFormat)pf]; if (v) { tex_put(t->serial, v); return v; } }
+        tex_put(t->serial, shared); return shared;
+    }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
