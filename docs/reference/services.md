@@ -465,8 +465,8 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** a null read at `sdk+0x4f4768` in `nn::oe::SetGraphicsScaleChangedNotificationEnabled`, on the game's Prepare Thread right after `oe::SetFocusHandlingMode` (Mario Kart World 1.0.0, `main+0xc78304`).
 - **Cause:** the Switch 2 SDK (19.3.3) adds a graphics scale to `nn::oe`: `GetGraphicsScalingParameters` asks am's graphics scaling interface (`nn::am::GetGraphicsScalingParametersFunctions`) for a u32 that `GetCurrentGraphicsScale` accepts only as 10, 20 or 30 (GraphicsScale 0, 1, 2; anything else is `UnexpectedDefault`, `sdk+0x4f4700`), and `SetGraphicsScaleChangedNotificationEnabled` goes to the same interface, which the host never makes.
-- **Fix:** hooked (`hle_oe.c`): `GetGraphicsScalingParameters` answers 10, `GetCurrentGraphicsScale` 0, and the notification switch does nothing: the host's scale never changes.
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0.
+- **Fix:** hooked (`hle_oe.c`): `GetGraphicsScalingParameters` answers 10, `GetCurrentGraphicsScale` 0, and the notification switch does nothing: the host's scale never changes. `DM_GRAPHICS_SCALE=1` or `2` answers 20 / 30 and scale 1 / 2 from the start instead, to see what a game does while the system takes GPU time of its own: Mario Kart World then renders every scene smaller (scale 2: 1706x960 of a 2560x1440 window) and stretches it in its final composite.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0 ([Render resolution and NDSR](../../dm/games/0400C3F00006E000/README.md#render-resolution-and-ndsr-wave-4)).
 
 ### The startup logo
 

@@ -154,9 +154,16 @@ HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resol
 // Switch 2 graphics scale (SDK 19.3.3): nn::oe::GetGraphicsScalingParameters asks am's graphics scaling interface for a u32 that GetCurrentGraphicsScale accepts only as 10, 20
 // or 30 (GraphicsScale 0, 1, 2; anything else is UnexpectedDefault, sdk+0x4f4700 in Mario Kart World 1.0.0), and the notification switch goes to the same interface. The host opens
 // no am, so the SDK's versions read a null interface (Mario Kart World's Prepare Thread crashed in SetGraphicsScaleChangedNotificationEnabled, main+0xc78304). The host's scale is
-// the first (10) and never changes, so no notification follows
-HLE_FORCE("_ZN2nn2oe28GetGraphicsScalingParametersEv", "Switch 2 graphics scaling parameters (through am): 10, the first scale; the host's never changes", unsigned, h_oe_GScaleParams, void) { return 10; }
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "Switch 2 graphics scale (through am): 0, the scaling parameters' 10", int, h_oe_GScale, void) { return 0; }
+// the first (10) and never changes, so no notification follows. DM_GRAPHICS_SCALE=1 or 2 answers the second or third scale (20, 30) from the start instead, as the system does while
+// it needs GPU time of its own (Mario Kart World then renders smaller and upscales with its NDSR network)
+static int gscale(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_GRAPHICS_SCALE"); v = e && (*e == '1' || *e == '2') && !e[1] ? *e - '0' : 0;
+        if (v) LOG("oe: graphics scale %d (scaling parameters %d) from DM_GRAPHICS_SCALE", v, 10 * (v + 1)); }
+    return v;
+}
+HLE_FORCE("_ZN2nn2oe28GetGraphicsScalingParametersEv", "Switch 2 graphics scaling parameters (through am): 10, the first scale (DM_GRAPHICS_SCALE: 20 or 30); the host's never changes", unsigned, h_oe_GScaleParams, void) { return 10 * (gscale() + 1); }
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "Switch 2 graphics scale (through am): 0, the scaling parameters' 10 (DM_GRAPHICS_SCALE: 1 or 2)", int, h_oe_GScale, void) { return gscale(); }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "Switch 2 graphics scale change notifications (through am): the host's scale never changes", void, h_oe_GScaleNtf, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",
           void, h_oe_DefResEv, void *ev) { hle_bind_system_event(ev, 0); }
