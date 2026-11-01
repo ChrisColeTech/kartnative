@@ -1,7 +1,7 @@
 # Benchmark routes for scripts/bench.py: name, DM_KEYS, measuring window start and length (s), description.
 # From a new save (first boot), console mode. The presses are frame steps (applied at the game's own input reads), so the route holds at any frame rate; the windows are seconds
-# from host start of the wave-3 Mac run with compute on (chain c9eaf5476660, about 11-16 fps, run/MacPlay/r9.log): title "Press L + R to start" from about frame 2400 (L+R at 2500),
+# from host start of the wave-3 Mac run with compute on (chain d1a62107da8c, 16-40 fps, run/MacPlay/r11.log): title "Press L + R to start" from about frame 2400 (L+R at 2500, 71 s),
 # then A every 200 frames from 2700: Single Player, Grand Prix, Mario, Standard Kart, Mushroom Cup, "Start Grand Prix?" OK; the Mushroom Cup movie (KinokoOp.webm) from about
-# frame 4140, the race (Mario Bros. Circuit) from about frame 5800, A held for acceleration from frame 6000. The game note's "Route on the Mac" has the screenshots of each step
-gp-race	f2500:L+R~f20,f2700:A~f8*8/200,f6000:A~f4000	480	60	Grand Prix, Mushroom Cup, race 1 (Mario Bros. Circuit) with A held from frame 6000
-menus	f2500:L+R~f20,f2700:A~f8*8/200	160	60	title to the cup menu: the 2D menu screens between frames 2600 and 4000
+# frame 4140, the race (Mario Bros. Circuit) from about frame 5800, A held for acceleration from frame 6000 (199 s). The game note's "Route on the Mac" has the screenshots of each step
+gp-race	f2500:L+R~f20,f2700:A~f8*8/200,f6000:A~f6000	220	60	Grand Prix, Mushroom Cup, race 1 (Mario Bros. Circuit) with A held from frame 6000
+menus	f2500:L+R~f20,f2700:A~f8*8/200	80	40	title to the cup menu: the 2D menu screens between frames 2600 and 4000

@@ -68,7 +68,7 @@ From the NVN2 agents' runs (`$W/run/Nvn2*/`), headless:
 From a new save (the first boot asks nothing before the title), console mode, headless; the presses are frame steps, applied at the game's own input reads, so they hold at any frame rate:
 
 ```
-$W/run/lockrun.sh <name> route 480 DM_MSL_DIR=$W/shader/cache "DM_KEYS=f2500:L+R~f20,f2700:A~f8*8/200,f6000:A~f4000" "DM_NVN_SHOT=2490,2690,2790,2990,3190,3490,3790,3990,4290,6000:$W/run/<name>/route_%d.png"
+$W/run/lockrun.sh <name> route 720 DM_MSL_DIR=$W/shader/cache "DM_KEYS=f2500:L+R~f20,f2700:A~f8*8/200,f6000:A~f6000" "DM_NVN_SHOT=2490,2690,2790,2990,3190,3490,3790,3990,4290,6000,6800,8800:$W/run/<name>/route_%d.png"
 ```
 
 | Frame | Screen (shot in `$W/run/MacPlay/`) | Input |
@@ -84,6 +84,7 @@ $W/run/lockrun.sh <name> route 480 DM_MSL_DIR=$W/shader/cache "DM_KEYS=f2500:L+R
 | 3990 | loading the course over the world map (`r3_3990.png`) | — |
 | 4140-5573 | the Mushroom Cup movie (`KinokoOp.webm`, [Movies](#movies)) | — |
 | ≈5800 | race 1, Mario Bros. Circuit (`Race_FirstCircuit_A_00`): countdown, coins, lap 1/3, minimap (`r9_6000.png`) | A held from 6000 |
+| 6800-9800 | the race driven by the held A: lap 1/3 23rd (`r11_6800.png`), lap 2/3 17th (`r11_8800.png`), 16th (`r11_9800.png`); items picked up (triple mushroom) | A held to 12000 |
 
 The game itself shows 2560x1440 in console mode; the A presses after the cup select confirm the course preview and the OK prompt (a press during a load is ignored). The same steps with seconds stop working when the frame rate changes; `bench.tsv` holds the route (`gp-race`) and a menus-only one. `DM_FS=1` shows the race's files (`AI/RaceSequence.root.ainb`, `Banc/Race_FirstCircuit_A_00[Game03].bcett.byml.zs`) and, during the race, the item models the CPU racers use (Kinoko, Teresa, Thunder, Banana, Boomerang, Bomhei, Togezo).
 
@@ -99,8 +100,12 @@ Apple M5 Pro with 24 GB, headless, console mode, from the host's per-300-frame l
 | r9 | menus (2700-4200) | 22-66 / 149-295 ms | 11-20 | 12.6-13.5 GB / 14.8-15.0 GB |
 | r9 | movie (4200-5400) | 21-33 / 139-175 ms | 16-21 | 13.3-13.6 GB / 14.8-14.9 GB |
 | r9 | course load and race start (5400-6000) | 28-338 / 194-1181 ms | 2-15 | 13.9-14.0 GB / 15.0-15.1 GB |
+| r11, chain d1a62107da8c with Nvn2Render's sparse-check (cf0344bb) and refused-pipeline (bd82c6be) fixes | intro and title (300-2700) | 17-22 / 40-90 ms | 27-42 | 11.0-12.6 GB / 13.5-14.8 GB |
+| r11 | menus (2700-4200) | 18-24 / 76-116 ms | 23-30 | 13.0-13.4 GB / 14.8-14.9 GB |
+| r11 | movie (4200-5700) | 19-21 / 73-85 ms | 28-31 | 13.2-13.4 GB / 14.7-14.9 GB |
+| r11 | race (6000-15000) | 24-27 / 107-181 ms | 16-22 | 13.5-14.1 GB / 15.0-15.7 GB |
 
-With compute running, the game's threads wait more than they work: in `sample` at 80 s (16 fps, `$W/run/MacPlay/r8_sample.txt`, `sample_busy.py` beside it) the Presentation Thread (0x1004, the NVN submit thread) is busy 54% of the time, and half of that is `nvn_dirty_since` ← `nvn_sparse_since` ← `tex_mtl` for each draw that binds a sparse texture (its dirty stamps are scanned over the whole sparse range); the main thread waits on the job system (`main+0x668f8`, `WaitLightEvent`) and under `main+0x25ec590`, the workers are idle. Reported to Nvn2Render; frame time p50 was 16.6 ms before the compute passes ran.
+With compute running, the game's threads wait more than they work. In `sample` at 80 s (16 fps, chain 0e064b18bfaa, `$W/run/MacPlay/r8_sample.txt`, `sample_busy.py` beside it) the Presentation Thread (0x1004, the NVN submit thread) was busy 54% of the time, half of it `nvn_dirty_since` ← `nvn_sparse_since` ← `tex_mtl` for each draw that binds a sparse texture (fixed by Nvn2Render, cf0344bb). In the race (`r12_sample.txt`, frame ≈6500, 18 fps) the frame is serial: the main thread spends 46% of its samples in `nvnSyncWait` at `main+0x25ec58c` (the fence of its earlier GPU work) and 41% in the job wait (`main+0x668f8`, `WaitLightEvent`); the Presentation Thread is 50% in `nvnQueueSubmitCommands` (the replay's encoding: draws, argument encoding, texture lookups, render pass starts, mesh draws) and 49% idle; the job workers are idle. Encoding (≈25 ms a frame), then the GPU (p50 11 ms), then the fence: the lever is in the replay (Nvn2Render); nothing in the host's threads or services stands out.
 
 ## Movies
 
