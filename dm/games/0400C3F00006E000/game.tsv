@@ -41,6 +41,11 @@ mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0x265100000
 sys_resource	0x4000000
+# The 1540 MB go to its NinVirtualAddressHeap (made at main+0x681134 from main+0x680d4c; tryAlloc main+0x6851f4 maps a region per block, nn::os::AllocateMemoryPages), whose free size
+# is what the system reports free (main+0x5b1004: QueryMemoryInfo total - used). On Horizon the used memory counts the pages mapped in the alias region; the host left them out, so the
+# heap's free size never fell, and the blocks it holds (954 regions of 0xb1000 bytes by the fourth race, each a 512x512 R16 texture of 10 levels, with its packaged Metal copy) were never let go:
+# 2.4 GB mapped by then, past the 1.5 GB the pool leaves (RamFix, run m0). With the limit the used memory counts them and a map past the pool fails, as on Horizon
+mem_map_limit	on
 
 # ---- Shaders ----
 # where MKW's NVN2 shaders live (shader_split.py): Shader/*.bfsha and the Drive sarc's BAHS, Layout/*.blarc BNSH, Effect esetb BNSH, Lib/ (agl, gsys, sead, Terrain, Visualizer); main's own BNSH go to 'main'
