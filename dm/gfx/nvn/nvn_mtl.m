@@ -10251,8 +10251,11 @@ static void copy_b2t(const p_copy_b2t *c) {
     size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + bw - 1) / bw) * bpb;
     size_t rows = (c->r.height + bh - 1) / bh, img = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;   // per layer: SetCopyImageStride, else tightly packed
     int is3d = c->tex->d.target == 2, nz = c->r.depth ? c->r.depth : 1;
-    PD("C ser=%llu target %d %ux%ux%u format %#x lv%u sl%u region %d,%d,%d %dx%dx%d from %#llx row %zu image %zu", c->tex->serial, c->tex->d.target, c->tex->d.width, c->tex->d.height, c->tex->d.depth,
-       c->tex->d.format, level, layer0, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, (unsigned long long)c->src, row, img);
+    // DM_NVN_PASSDUMP: with a checksum of the source bytes (64 samples of 64 bytes across the copy), to tell a source that changes from frame to frame from one that does not
+    uint64_t sum = 0; if (passdump() && nvn_host_readable(c->src, img * nz) && img * nz >= 64) { const uint8_t *s = (const uint8_t *)(uintptr_t)c->src; size_t n = img * nz, st = n / 64;
+        sum = 1469598103934665603ull; for (int q = 0; q < 64; q++) for (int k = 0; k < 64; k++) sum = (sum ^ s[MIN((size_t)q * st + k, n - 1)]) * 1099511628211ull; }
+    PD("C ser=%llu target %d %ux%ux%u format %#x lv%u sl%u region %d,%d,%d %dx%dx%d from %#llx row %zu image %zu sum %016llx", c->tex->serial, c->tex->d.target, c->tex->d.width, c->tex->d.height, c->tex->d.depth,
+       c->tex->d.format, level, layer0, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, (unsigned long long)c->src, row, img, (unsigned long long)sum);
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "buffer→texture copy source is in no memory pool"); return; }
     // The copy's bytes belong in the texture's storage: written there now from the buffer's, unless the GPU writes the buffer (a copy, fill or update queued in this submission: pend_hits; a shader
