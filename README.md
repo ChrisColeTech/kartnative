@@ -1,3 +1,67 @@
+# nxnative for Switch 2: Mario Kart World
+
+A fork of [nxnative](https://github.com/seedds/nxnative) that runs **Mario Kart World 1.0.0** (Nintendo Switch 2) natively on an Apple silicon Mac. As upstream, it is not an emulator: the game's own code runs on the Mac's CPU, its graphics API (NVN2) is reimplemented on Metal, and its Switch 2 shaders (Ampere SM86 machine code) are translated to Metal offline. Bring your own decrypted dump; nothing from the game is in this repository.
+
+<p align="center">
+<img src="docs/images/mario-kart-world-title.jpg" width="49%" alt="Mario Kart World's title screen running on a Mac">
+<img src="docs/images/mario-kart-world-menu.jpg" width="49%" alt="Mario Kart World's main menu running on a Mac">
+<img src="docs/images/mario-kart-world-race.jpg" width="98.5%" alt="A Grand Prix race on Mario Bros. Circuit running on a Mac">
+</p>
+
+<p align="center"><sub>Captured on the Mac at the game's 2560x1440: the title screen, the main menu and a Grand Prix race on Mario Bros. Circuit.</sub></p>
+
+## Status
+
+| | |
+|---|---|
+| Game | Mario Kart World 1.0.0 (`0400C3F00006E000`), from a decrypted loose dump (`exefs/` and `romfs/`) |
+| Platform | Mac only, Apple silicon (tested on an M5 Pro with 24 GB, macOS 27). No iOS build yet |
+| Plays | Boot, menus, the cup-opening movies, whole Grand Prix cups at 150cc, Time Trials and Free Roam, with a controller (DualSense tested) |
+| Frame rate | A steady 60 fps, also in fullscreen on 120 Hz ProMotion screens |
+| Memory | About 11–12 GB resident, flat over a cup |
+| Graphics | All 11,567 of the game's shaders translate (task and mesh shaders become Metal mesh shaders); terrain and water draw correctly |
+| Known issues | Some scenery objects vanish and reappear while driving (being investigated); online play is not available |
+
+## Play it on a Mac
+
+1. Install the tools as upstream does ([Build from the command line](#build-from-the-command-line), step 1).
+2. Put the dump in one folder, `MarioKartWorld/exefs/` (`main`, `main.npdm`, `sdk`, `subsdk0`) and `MarioKartWorld/romfs/`.
+3. Build for the Mac. The first build translates the game's ~11,600 shaders, about 30 minutes; later builds reuse them. `--allow-other-metal` is needed when your Metal compiler is not the one in `dm/gfx/tools/dmsh_chain.lock`:
+
+   ```
+   python3 scripts/build_ipa_from_nsp.py ~/Games/MarioKartWorld --platform mac --no-heap-check --allow-other-metal
+   ```
+
+4. Run the command the script prints. It opens a window (`DM_WINDOW=1`). Useful additions:
+
+   | Variable | Effect |
+   |---|---|
+   | `DM_FULLSCREEN=1` | Start in fullscreen (⌃⌘F toggles, ⌘Q quits) |
+   | `DM_LANG=it` | Game language (any language code the game has) |
+   | `DM_PAD_SWAP=1` | Exchange A/B and X/Y on a physical controller, for pads labelled the Xbox / PlayStation way |
+   | `DM_PRESENT_UPSCALE=metalfx` | Scale the 2560x1440 picture to a larger screen with MetalFX instead of bilinear filtering |
+   | `DM_METAL_HUD=1` | Apple's Metal performance HUD (frame rate, GPU time, memory) |
+
+   The first start prepares the game's pipelines (about 15 seconds) before the first frame. macOS turns Game Mode on in fullscreen when the host runs inside an app bundle that declares a games category, as the Mac app packaging does.
+
+## What the Switch 2 port adds
+
+- **Kernel and SDK:** Switch 2 programs are detected from `main.npdm`; the host answers with the Switch 2's 31.25 MHz system counter, six cores, its new `svc` and `GetInfo` values and its memory layout, and hooks the new SDK services the game uses (graphics scale, `nn::vi` display queries, `nn::codec` video decoding through libvpx, `nn::syncpt`, audio output streams).
+- **NVN2 on Metal:** API 231.16 and its device table, NVN2 queues, pools, command buffers (push constants, mesh-task draws, shading-rate state), programs and windows; Switch 2 block-linear layout; sparse textures on Metal placement-sparse textures; CPU-written textures taken from their memory at first sampling.
+- **Shaders:** a native SM86 frontend inside the vendored Ryujinx translator (uniform registers, warp and tensor operations, task and mesh stages), the game's per-program compute bindings decoded from its shader control sections, threadgroup memory past Metal's 32 KB moved to a device buffer.
+- **Frame pacing:** in fullscreen on screens faster than 60 Hz the display link runs at the screen's rate with 60 Hz ticks, so a late frame waits one refresh, not a whole frame. Mario Kart World advances its game one fixed step per frame, so a steady 60 fps is also what keeps its speed right.
+
+Details: [the game's note](dm/games/0400C3F00006E000/README.md), [NVN2](docs/reference/nvn2.md), [the SM86 frontend](docs/reference/shaders-sm86.md), [Switch 2 shader containers and translation](docs/reference/shaders.md).
+
+## Credits
+
+- [nxnative](https://github.com/seedds/nxnative) by seedds, and [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) before it: everything this fork builds on.
+- What Switch 2's services, NVN2 and SM86 do was learnt in part from the public commits and notes of the [Eglantine](https://github.com/Djihads80/Eglantine) and [PokeDinner](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork) emulators. Only facts were taken, no code, so this fork keeps nxnative's MIT license. SM70+ instruction encodings follow Mesa's NAK compiler (MIT).
+
+Not affiliated with Nintendo. Play games you own.
+
+---
+
 # nxnative
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
