@@ -73,7 +73,7 @@ HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the ho
 }
 // Switch 2 SDK (Mario Kart World, SDK 19.3.3): the display's HDR and VRR queries and the layer's HDR metadata and extended swap interval. The SDK's display queries check
 // the display against their own vi2 object (sdk+0x536710: the host's display gets 0x272 and the outputs stay unwritten); the layer functions call into the vi2 service the host never made. The host presents in SDR (BT.709,
-// 8-bit window textures) on a fixed-rate display, so it answers no HDR and no VRR; MKW queries both from its display object (main+0x226ce40, main+0x226cdcc).
+// 8-bit window textures) on a fixed-rate display, so it answers no HDR and no VRR; MKW queries HDR from its framework's frame method (main+0x3a9e6c; the base class's at main+0x226ce40).
 //   QueryDisplayHdrStatus(bool *enabled, HdrOutputFormat *format, u16 *max luminance, display): HDR off, format 0; MKW keeps min(max luminance, its own limit) beside
 //   the paper white (QueryDisplayHdrPaperWhite, scaled by a float of its own). With HDR off it does not output in those units [INFERENCE: it switches its window format only with
 //   HDR on, main+0x26227c]; the host answers the BT.709 / BT.1886 SDR reference, 100 cd/m2, for both, a white that is the display's peak rather than a 0 a division could meet
@@ -95,9 +95,11 @@ HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_
           Result, h_vi_HdrExt, void *layer, uint16_t lo, uint16_t hi) {
     (void)layer; static int once; if (!once++) LOG("vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata %u..%u (ignored: the host presents SDR)", lo, hi); return RES_OK;
 }
-// VRR: MKW asks whether the display supports it and, when it does and its frame-rate setting is 40 or more, sets the display's VRR capability and the layer's extended swap
-// interval (layer, 1, frame rate); otherwise it clears both (main+0x226cdcc..+0x226ce38). No VRR here, so the frame rate follows the window's present interval
-// (nvnWindowSetPresentInterval, docs/reference/frame-rate.md). SetDisplayVrrCapability returns nothing (sdk+0x536670)
+// VRR: a display framework base class in Mario Kart World's main asks whether the display supports it and, when it does and its frame-rate setting is 40 or more, sets the display's
+// VRR capability and the layer's extended swap interval (layer, 1, frame rate); otherwise it clears both (main+0x226cdcc..+0x226ce38, the base class's frame method). MKW's own
+// framework class overrides that method and the frame wait (main+0x3a9e28, +0x25ec50c) without any VRR call, so none of these is reached in 1.0.0. The host's display link shows
+// frames on a fixed 60 Hz grid (nvn_mtl.m), so the answer stays no and the frame rate follows the window's present interval (nvnWindowSetPresentInterval, docs/reference/frame-rate.md).
+// SetDisplayVrrCapability returns nothing (sdk+0x536670)
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR support; the host display has a fixed rate: no", Result, h_vi_VrrSupported, uint8_t *out, const void *disp) {
     (void)disp; if (out) *out = 0; return RES_OK;
 }
