@@ -105,8 +105,20 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+// Diagnostic DM_CAPTURE=<dir> (Mac window): each press of P saves the next presented frame as <dir>/capture_<n>.png and logs the render passes of the next frame, as DM_CTL's
+// "shot" and "passdump 1" do, for catching a moment in play (an object that vanishes, then the frame it is back); P is no game key
+static void capture_key(void) {
+    static const char *dir; static int n, init;
+    if (!init) { init = 1; dir = getenv("DM_CAPTURE"); if (dir && !*dir) dir = NULL; if (dir) (void)mkdir(dir, 0755); }
+    if (!dir) return;
+    void dm_gfx_passdump_next(long frames);
+    char path[1024]; snprintf(path, sizeof path, "%s/capture_%03d.png", dir, ++n);
+    dm_gfx_shot_at(1, path); dm_gfx_passdump_next(1);
+    LOG("DM_CAPTURE: capture %d: screenshot of the next frame → %s, its render passes in this log ([pass] lines)", n, path);
+}
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
+    if (e.keyCode == 35) { if (down) capture_key(); return; }   // P
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     int b = key_bit(c);

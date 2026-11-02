@@ -12,6 +12,7 @@ DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing,
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
+DM_CAPTURE	diagnostic	`=<dir>` (Mac window): each press of P saves the next presented frame as `<dir>/capture_<n>.png` and logs the next frame's render passes, as `DM_CTL`'s `shot` and `passdump 1` (with `DM_NVN_PASSDUMP_ALL=1` every draw); the log line `DM_CAPTURE: capture <n>` marks each press
 DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them
 DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of the game when it is the only one (its addresses may not fit: for `cheat_anchor.py` checks)
 DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes and the cheat file context the menu's "another version" rows come from
