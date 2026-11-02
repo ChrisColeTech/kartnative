@@ -568,6 +568,7 @@ void mtl_pool_del(const void *mem) {
     @autoreleasepool {
     for (int i = 0; i < g_npool; i++)
         if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
+            nvn_stex_forget(g_pools[i].lo, g_pools[i].hi - g_pools[i].lo);   // its memory no longer holds what a GPU-written sparse tile left there (the lost-content count)
             if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
             [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
     }
@@ -2715,7 +2716,8 @@ static void stex_sync(NvPkg *pk, const tex_t *t, int all) {
 // of whose storage the game maps 8-26 MB each) are placement-sparse textures too, whose tiles follow the guest's mappings with no upload: a tile's page is the memory the
 // GPU writes, shared by every tile of one physical memory (nvn_stex_new gpu), unmapped tiles drop writes and read 0, as on the GPU. The sharing table keeps the texture;
 // its owner, an associated object, gives the pages back when it goes. The tiles follow the mappings at the start of each submission whose pool's mappings changed
-@interface NvGpuStex : NSObject { @public nvn_stex *s; const void *pool; uint64_t mem, vgen; } @end
+// ser … fmt: the texture, for the lost-content lines; seen_lost: its lost tiles already reported
+@interface NvGpuStex : NSObject { @public nvn_stex *s; const void *pool; uint64_t mem, vgen, ser, seen_lost; uint32_t w, h, d, fmt; } @end
 static NvGpuStex *__unsafe_unretained *g_gstex; static int g_ngstex, g_cgstex;
 static pthread_mutex_t g_gstex_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;   // recursive: an owner's dealloc (its texture's last release) may come while a sync holds it
 @implementation NvGpuStex
@@ -2729,12 +2731,34 @@ static void gstex_sync(NvGpuStex *o) {   // submit thread
     nvn_stex_host h = {NULL, stex_stage, stex_encoder, stex_resident};
     int64_t n = nvn_stex_sync(o->s, g_q4, &g, &h, 0);
     if (n < 0) RED_ONCE(145, "GPU-written sparse texture sync failed (no tile heap or staging): its tiles stay as they were");
+    // Diagnostic (docs/reference/nvn-objects.md, GPU-written sparse textures): a tile mapped onto physical memory whose page had gone back to the heaps starts as zeros here,
+    // where the GPU reads what that memory held. Logged at the first one, then by gstex_report
+    uint64_t lost, fresh; nvn_stex_lost(o->s, &lost, &fresh);
+    if (lost > o->seen_lost) { static int once; if (!once++) MLOG("[RED] GPU-written sparse texture ser=%llu %ux%ux%u format %#x: %llu tiles mapped onto memory whose content the host had dropped (it starts as zeros; the GPU keeps it), %llu onto memory no tile held before (first case, frame %llu)",
+        (unsigned long long)o->ser, o->w, o->h, o->d, o->fmt, (unsigned long long)(lost - o->seen_lost), (unsigned long long)fresh, (unsigned long long)atomic_load(&g_cur_frame)); }
     if (!g_cb) up_flush();
     o->vgen = vg;
+}
+// Every 3,600 submissions while GPU-written sparse textures exist: their tiles mapped onto memory whose content the host had dropped (lost) and onto new memory (fresh), in all
+// and per texture with lost tiles since the last report (submit thread, under g_gstex_mu)
+static void gstex_report(void) {
+    static uint64_t last_sub, last_lost, last_fresh;
+    if (!g_ngstex || g_sub_serial - last_sub < 3600) return;
+    last_sub = g_sub_serial;
+    uint64_t lost, fresh; nvn_stex_lost(NULL, &lost, &fresh);
+    if (lost == last_lost && fresh == last_fresh) return;
+    char per[512]; size_t at = 0; per[0] = 0;
+    for (int i = 0; i < g_ngstex && at < sizeof per - 96; i++) { NvGpuStex *o = g_gstex[i]; uint64_t l, f; nvn_stex_lost(o->s, &l, &f);
+        if (l > o->seen_lost) at += (size_t)snprintf(per + at, sizeof per - at, "%s ser=%llu %ux%ux%u %#x +%llu", at ? "," : "", (unsigned long long)o->ser, o->w, o->h, o->d, o->fmt, (unsigned long long)(l - o->seen_lost));
+        o->seen_lost = l; }
+    MLOG("GPU-written sparse textures up to frame %llu: tiles mapped onto memory whose content the host had dropped %llu (+%llu), onto new memory %llu (+%llu)%s%s", (unsigned long long)atomic_load(&g_cur_frame),
+         (unsigned long long)lost, (unsigned long long)(lost - last_lost), (unsigned long long)fresh, (unsigned long long)(fresh - last_fresh), at ? "; lost by texture:" : "", per);
+    last_lost = lost; last_fresh = fresh;
 }
 static void gstex_sync_all(void) {   // mtl_sub_begin: the textures whose pool's mappings changed since their last sync
     pthread_mutex_lock(&g_gstex_mu);
     for (int i = 0; i < g_ngstex; i++) { NvGpuStex *o = g_gstex[i]; if (o->pool && nvn_sparse_pool_gen(o->pool) != o->vgen) gstex_sync(o); }
+    gstex_report();
     pthread_mutex_unlock(&g_gstex_mu);
 }
 static void gstex_drop_pool(const void *pool) {   // the pool is finalized: its textures no longer follow it
@@ -2748,6 +2772,7 @@ static id<MTLTexture> gstex_new(const tex_t *t) {
     nvn_stex *s = nvn_stex_new(g_dev, md, &t->d, 1); if (!s) return nil;
     id<MTLTexture> mt = nvn_stex_take(s);
     NvGpuStex *o = [NvGpuStex new]; o->s = s; o->pool = t->pool; o->mem = (uint64_t)(uintptr_t)t->mem; o->vgen = ~0ull;
+    o->ser = t->serial; o->w = t->d.width; o->h = t->d.height; o->d = t->d.depth; o->fmt = (uint32_t)t->d.format;
     objc_setAssociatedObject(mt, &g_gstex_key, o, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     res_add(mt);
     pthread_mutex_lock(&g_gstex_mu);

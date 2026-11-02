@@ -50,3 +50,8 @@ void nvn_stex_free(nvn_stex *s, id<MTL4CommandQueue> q);
 uint64_t nvn_stex_mapped_bytes(void);   // heap pages in use by every sparse texture (tiles with the same memory share one; the heaps can hold more)
 uint64_t nvn_stex_tile_bytes(void);     // tiles mapped by every sparse texture, shared ones counted for each
 uint64_t nvn_stex_heap_bytes(void);     // the placement heaps those pages come from (heaps stay once made)
+// Diagnostic, GPU-written textures: tiles mapped onto physical memory whose heap page had gone back to the heaps when no tile mapped it any more (lost: the host
+// starts them as zeros where the GPU keeps what the memory held), and tiles mapped onto memory no tile held before (fresh); for s, or all textures (s NULL)
+void nvn_stex_lost(const nvn_stex *s, uint64_t *lost, uint64_t *fresh);
+// The guest memory [lo, lo + n) is no longer physical memory a tile can map (its pool is finalized): a later mapping at those addresses counts as fresh
+void nvn_stex_forget(uint64_t lo, uint64_t n);

@@ -242,6 +242,36 @@ static void s4(void) {
     printf("  S4 GPU-written R8: a tile shared by its physical memory reads what the GPU wrote through the other texture, pages of their own start as zeros\n");
 }
 
+// The lost-content count (nvn_stex_lost): a GPU-written tile mapped again onto physical memory whose page went back to the heaps counts as lost (the host starts it as
+// zeros, the GPU keeps what the memory held); onto memory no tile held before, or memory whose pool went (nvn_stex_forget), as fresh
+static void s5(void) {
+    nvn_texdesc d = {1, 0x1, 0x28, 0, 1024, 1024, 1, 1, 0, 0}; nvn_texlayout L; nvn_tex_layout(&d, &L); uint64_t np = L.size >> 16;
+    guest ga = {NULL, L.size, malloc(np), calloc(np, 1), calloc(np, 8)};
+    memset(ga.map, 1, np); for (uint64_t p = 0; p < np; p++) ga.phys[p] = (0x400 + p) << 16;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor new]; td.pixelFormat = MTLPixelFormatR8Unorm; td.width = 1024; td.height = 1024; td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    nvn_stex *a = nvn_stex_new(dev, td, &d, 1); CHECK(a != NULL, "S5 GPU-written sparse texture not created"); if (!a) return;
+    id<MTLTexture> ta = nvn_stex_take(a);
+    id<MTLResidencySet> rs = [dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
+    host h = {[dev newBufferWithLength:4 << 20 options:MTLResourceStorageModeShared], 0, rs};
+    [rs addAllocation:h.b]; [rs addAllocation:ta]; [rs commit]; [q addResidencySet:rs];
+    nvn_stex_guest gga = {&ga, 0, g_mapped, g_changed, NULL, g_backing}; nvn_stex_host hh = {&h, h_stage, h_encoder, h_resident};
+    uint64_t gl0, gf0, l, f; nvn_stex_lost(NULL, &gl0, &gf0);
+    sync_in(a, &gga, &hh); h.used = 0; nvn_stex_lost(a, &l, &f);
+    CHECK(l == 0 && f == np, "S5 first mapping: %llu lost, %llu fresh, expected 0 and %llu", (unsigned long long)l, (unsigned long long)f, (unsigned long long)np);
+    // tile 1 unmapped (its page goes back: no other tile maps that memory), then mapped again on the same memory: lost
+    ga.map[1] = 0; sync_in(a, &gga, &hh); h.used = 0; ga.map[1] = 1; ga.wr[1] = 1; sync_in(a, &gga, &hh); h.used = 0; ga.wr[1] = 0;
+    nvn_stex_lost(a, &l, &f); CHECK(l == 1 && f == np, "S5 remap onto the dropped memory: %llu lost, %llu fresh, expected 1 and %llu", (unsigned long long)l, (unsigned long long)f, (unsigned long long)np);
+    // tile 2 moves onto memory no tile held: fresh; its old memory's pool goes (forgotten), then tile 3 moves onto that address: fresh, not lost
+    uint64_t old2 = ga.phys[2]; ga.phys[2] = 0x900ull << 16; ga.wr[2] = 1; sync_in(a, &gga, &hh); h.used = 0; ga.wr[2] = 0;
+    nvn_stex_forget(old2, 0x10000); ga.phys[3] = old2; ga.wr[3] = 1; sync_in(a, &gga, &hh); h.used = 0; ga.wr[3] = 0;
+    nvn_stex_lost(a, &l, &f); CHECK(l == 1 && f == np + 2, "S5 moves onto new and forgotten memory: %llu lost, %llu fresh, expected 1 and %llu", (unsigned long long)l, (unsigned long long)f, (unsigned long long)(np + 2));
+    uint64_t gl, gf; nvn_stex_lost(NULL, &gl, &gf); CHECK(gl - gl0 == 1 && gf - gf0 == np + 2, "S5 totals: %llu lost, %llu fresh", (unsigned long long)(gl - gl0), (unsigned long long)(gf - gf0));
+    [rs removeAllocation:ta]; [rs commit]; ta = nil;
+    nvn_stex_free(a, q);
+    free(ga.map); free(ga.wr); free(ga.phys);
+    printf("  S5 GPU-written R8: a tile mapped again onto memory whose page had gone back counts as lost, onto new or forgotten memory as fresh\n");
+}
+
 int main(void) {
     @autoreleasepool {
         dev = MTLCreateSystemDefaultDevice(); q = [dev newMTL4CommandQueue]; al = [dev newCommandAllocator]; ev = [dev newSharedEvent];
@@ -250,6 +280,7 @@ int main(void) {
         printf("S2 Mario Kart World's virtual texture shape\n"); s2();
         printf("S3 tiles with one memory behind them share a heap page\n"); s3();
         printf("S4 GPU-written sparse textures\n"); s4();
+        printf("S5 lost-content count of GPU-written sparse textures\n"); s5();
         printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
         return fails ? 1 : 0;
     }

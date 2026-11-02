@@ -24,6 +24,14 @@ static uint64_t g_pages, g_tiles;   // heap pages in use / tiles mapped to them,
 // the page; value: heap page + 1. Under g_mu
 static nvn_hmap g_shared = {.klen = 8};
 static uint64_t share_key(uint64_t phys, MTLPixelFormat pf, int gpu) { return phys ? phys | (uint64_t)pf << 52 | (uint64_t)gpu << 62 : 0; }
+// Diagnostic for GPU-written textures (the reference entry's limit): the share keys of their pages that went back to the heaps while the guest kept the physical memory.
+// The GPU keeps what such memory holds; the host does not, so a tile mapped onto it later starts as zeros (counted as lost, nvn_stex_lost), where a tile mapped onto
+// memory no tile held before is new (counted as fresh). A key is forgotten when its physical pool goes (nvn_stex_forget). Under g_mu
+enum { FREED_MAX = 1 << 20 };
+#define KEY_GPU (1ull << 62)
+#define KEY_ADDR(k) ((k) & ((1ull << 52) - 1))
+static nvn_hmap g_freed = {.klen = 8};
+static uint64_t g_lost_tiles, g_fresh_tiles;
 
 typedef struct { int32_t page; uint8_t dirty; uint64_t key; } ent;   // page: heap index << 16 | page index (a tile), 0 (the mip tail entry, mapped), -1 = unmapped; key: its page's share key (0: not shared)
 struct nvn_stex {
@@ -42,6 +50,7 @@ struct nvn_stex {
     ent *e;
     int32_t *tailpg;                 // slices × tail_tiles pages of the mapped mip tails
     int pending;
+    uint64_t lost, fresh;            // GPU-written: tiles mapped onto memory whose page had gone back to the heaps (content lost) / onto memory no tile held before
 };
 
 static uint32_t mipd(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
@@ -102,10 +111,22 @@ int nvn_stex_pending(const nvn_stex *s) { return s && s->pending; }
 uint64_t nvn_stex_mapped_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_pages * TILE; pthread_mutex_unlock(&g_mu); return b; }
 uint64_t nvn_stex_tile_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = g_tiles * TILE; pthread_mutex_unlock(&g_mu); return b; }
 uint64_t nvn_stex_heap_bytes(void) { pthread_mutex_lock(&g_mu); uint64_t b = (uint64_t)g_nheaps * HEAP_PAGES * TILE; pthread_mutex_unlock(&g_mu); return b; }
+void nvn_stex_lost(const nvn_stex *s, uint64_t *lost, uint64_t *fresh) {
+    pthread_mutex_lock(&g_mu); *lost = s ? s->lost : g_lost_tiles; *fresh = s ? s->fresh : g_fresh_tiles; pthread_mutex_unlock(&g_mu);
+}
+void nvn_stex_forget(uint64_t lo, uint64_t n) {
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t i = 0; i < g_freed.cap;) {   // a deletion shifts later entries back into slot i: look at it again
+        uint64_t k; memcpy(&k, g_freed.keys + (size_t)i * 8, 8);
+        if (g_freed.vals[i] && KEY_ADDR(k) >= lo && KEY_ADDR(k) - lo < n) nvn_hm_del(&g_freed, &k); else i++;
+    }
+    pthread_mutex_unlock(&g_mu);
+}
 
 // A heap page for one tile (→ heap << 16 | page, -1 when no heap can be had): the page already holding key's memory if there is one (key 0: a page of its own);
-// *alone: 1 when the page is new to this tile (its content undefined)
-static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, int *alone) {
+// *alone: 1 when the page is new to this tile (its content undefined); *lost: 1 when it is a GPU-written key whose page had gone back to the heaps (g_freed)
+static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, int *alone, int *lost) {
+    *lost = 0;
     pthread_mutex_lock(&g_mu);
     void *sh = key ? nvn_hm_get(&g_shared, &key) : NULL;
     if (sh) { int p = (int)((intptr_t)sh - 1); g_heaps[p >> 16]->ref[p & 0xffff]++; g_tiles++; pthread_mutex_unlock(&g_mu); *alone = 0; return p; }
@@ -125,6 +146,7 @@ static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, i
         p = (int)(g_nheaps++ << 16);
     }
     sheap *hp = g_heaps[p >> 16]; hp->ref[p & 0xffff] = 1; hp->key[p & 0xffff] = key;
+    if (key & KEY_GPU) { *lost = nvn_hm_del(&g_freed, &key) != NULL; if (*lost) g_lost_tiles++; else g_fresh_tiles++; }
     if (key) nvn_hm_put(&g_shared, &key, (void *)(intptr_t)(p + 1));
     g_pages++; g_tiles++;
     pthread_mutex_unlock(&g_mu);
@@ -133,7 +155,10 @@ static int page_alloc(id<MTLDevice> dev, const nvn_stex_host *h, uint64_t key, i
 }
 static void page_free(int p) {   // one tile less on the page; the last one frees it
     pthread_mutex_lock(&g_mu); sheap *hp = g_heaps[p >> 16]; unsigned i = (unsigned)(p & 0xffff);
-    if (!--hp->ref[i]) { if (hp->key[i]) nvn_hm_del(&g_shared, &hp->key[i]); hp->key[i] = 0; hp->free[hp->nfree++] = (uint16_t)i; g_pages--; }
+    if (!--hp->ref[i]) {
+        if (hp->key[i] & KEY_GPU) { if (g_freed.n >= FREED_MAX) nvn_hm_clear(&g_freed, NULL); nvn_hm_put(&g_freed, &hp->key[i], (void *)1); }
+        if (hp->key[i]) nvn_hm_del(&g_shared, &hp->key[i]);
+        hp->key[i] = 0; hp->free[hp->nfree++] = (uint16_t)i; g_pages--; }
     g_tiles--; pthread_mutex_unlock(&g_mu);
 }
 
@@ -184,14 +209,15 @@ static int ent_map(nvn_stex *s, oplist *o, id<MTLDevice> dev, const nvn_stex_hos
     uint64_t a, n; unsigned lv; uint32_t x, y; ent_geom(s, z, k, &a, &n, &lv, &x, &y);
     if (lv < s->tiled) {
         if (!map) { op_add(o, 0, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, 0); page_free(e->page); e->page = -1; e->key = 0; return 0; }
-        int alone, p = page_alloc(dev, h, key, &alone); if (p < 0) return -1;
+        int alone, lost, p = page_alloc(dev, h, key, &alone, &lost); if (p < 0) return -1;
+        if (key & KEY_GPU) { if (lost) s->lost++; else if (alone) s->fresh++; }
         op_add(o, 1, MTLRegionMake3D(x, y, 0, 1, 1, 1), lv, z, p); e->page = p; e->key = key; return alone;
     }
     int32_t *pg = s->tailpg + (size_t)z * s->tail_tiles;
     for (unsigned j = 0; j < s->tail_tiles; j++) {
         unsigned tl; MTLRegion r; tail_tile(s, j, &tl, &r);
         if (!map) { op_add(o, 0, r, tl, z, 0); page_free(pg[j]); continue; }
-        int alone, p = page_alloc(dev, h, 0, &alone); (void)alone;   // a mip tail's pages are its own
+        int alone, lost, p = page_alloc(dev, h, 0, &alone, &lost); (void)alone; (void)lost;   // a mip tail's pages are its own
         if (p < 0) { while (j--) { tail_tile(s, j, &tl, &r); op_add(o, 0, r, tl, z, 0); page_free(pg[j]); } return -1; }
         op_add(o, 1, r, tl, z, p); pg[j] = p;
     }
