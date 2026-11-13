@@ -16,7 +16,7 @@
 #include <stdatomic.h>
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
-#include "romfs_image.h"
+#include "romfs_container.h"
 #include "save_sync.h"
 
 // Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
@@ -51,7 +51,7 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 #define FH_IN(h) ((uint64_t)(h) >> 4)
 typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
-    romfs_img *img;                  // non-NULL: dir is a RomFS image file
+    romfs_container *img;            // non-NULL: dir is a RomFS image or NUP file
     int ro;
     int txn_root;                    // canonical mount entry for this backing transaction, or -1
     _Atomic int poison;              // failure state belongs to this backing, not to the process
@@ -129,15 +129,15 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { return save_txn_from_path(hp); }
 static int rm_tree(const char *p);
-// Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image
-static romfs_img *img_open(const char *path) {
-    romfs_img *m = romfs_image_open(path);
-    if (m) LOG("fs RomFS image %s: %llu entries", path, (unsigned long long)m->n);
-    else LOG("[RED] fs RomFS image %s is not a complete image (copied in part? errno=%d)", path, errno);
+// Reads and checks a RomFS image or NUP index; NULL (and a red line) when it is not complete.
+static romfs_container *img_open(const char *path) {
+    romfs_container *m = romfs_container_open(path);
+    if (m) LOG("fs RomFS %s %s: %llu entries", m->nup ? "NUP" : "image", path, (unsigned long long)m->n);
+    else LOG("[RED] fs RomFS container %s is not complete (copied in part? errno=%d)", path, errno);
     return m;
 }
 // The entry a path names in an image: each component is a binary search of its directory's children, which the packer sorted by name (bytes, a shorter prefix first)
-static int64_t img_find(const romfs_img *m, const char *rest) {
+static int64_t img_find(const romfs_container *m, const char *rest) {
     uint64_t k = 0;
     while (*rest) {
         while (*rest == '/') rest++;
@@ -148,7 +148,7 @@ static int64_t img_find(const romfs_img *m, const char *rest) {
             if (m->e[k].type) { errno = ENOTDIR; return -1; }
             uint64_t lo = m->e[k].a, hi = lo + m->e[k].b; int found = 0;
             while (lo < hi) {
-                uint64_t mid = lo + (hi - lo) / 2; const img_ent *x = &m->e[mid];
+                uint64_t mid = lo + (hi - lo) / 2; const romfs_ent *x = &m->e[mid];
                 int c = memcmp(m->names + x->name, rest, x->nlen < len ? x->nlen : len);
                 if (!c) c = (x->nlen > len) - (x->nlen < len);
                 if (!c) { k = mid; found = 1; break; }
@@ -227,7 +227,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         // first failed read (Echoes of Wisdom crashed 0.3 s after nnMain, GitHub issue #615). Add-on content and system data check their own paths before they mount
         if (stat(dir, &ist) || !(S_ISDIR(ist.st_mode) || S_ISREG(ist.st_mode)))
             die("the game files %s (%s:) are missing: neither a folder nor a RomFS image (the rom mount is DM_ROMFS, or $DM_ROOT/romfs when DM_ROMFS is unset)", dir, name);
-        if (S_ISREG(ist.st_mode) && !(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s are not a complete RomFS image", dir);
+        if (S_ISREG(ist.st_mode) && !(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s are not a complete RomFS image or NUP", dir);
     }
     g_nmnt++;
     pthread_mutex_unlock(&g_lock);
@@ -471,14 +471,14 @@ static size_t romfs_work_size(const char *dir) {
     size_t ndir = 1, dbytes = 0x18, nfile = 0, fbytes = 0;   // the root directory has an entry with an empty name
     struct stat st;
     if (!stat(dir, &st) && S_ISREG(st.st_mode)) {
-        romfs_img *m = img_open(dir);
+        romfs_container *m = img_open(dir);
         if (!m) return 0x1000;
         for (uint64_t k = 1; k < m->n; k++) {
-            const img_ent *e = &m->e[k]; size_t name = (e->nlen + 3) & ~(size_t)3;
+            const romfs_ent *e = &m->e[k]; size_t name = (e->nlen + 3) & ~(size_t)3;
             if (e->type) { nfile++; fbytes += 0x20 + name; }
             else { ndir++; dbytes += 0x18 + name; }
         }
-        romfs_image_close(m);
+        romfs_container_close(m);
     } else romfs_tables(dir, &ndir, &dbytes, &nfile, &fbytes, 0);
     return 4 * romfs_buckets(ndir) + dbytes + 4 * romfs_buckets(nfile) + fbytes;
 }
@@ -751,15 +751,15 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { h = FH_IN(h);
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
-    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
-    if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
-        const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
-        fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
+    size_t got = 0; int reprep = 0, fd = (int)h; romfs_container *container = NULL;
+    if (IMG_H(h)) {   // a container entry: read raw bytes in place or a cached decompressed NUP entry, never past its logical end
+        container = g_mnt[IMG_M(h)].img; const romfs_ent *x = &container->e[IMG_K(h)];
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
     }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {
-        ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
+        ssize_t r = container ? romfs_container_pread(container, IMG_K(h), (uint8_t *)buf + got, sz - got, (uint64_t)off + got)
+                              : pread(fd, (uint8_t *)buf + got, sz - got, off + got);
         if (r < 0) { if (errno == EINTR) continue;
             // The graphics layer write-protects tracked pages again after each upload (nvn_dirty.c), so a page made writable above can be read-only again by the time pread
             // writes it: a plain write would fault into the tracker's handler, a system call gets EFAULT. Prepare the rest again (unprotect, mark dirty) and read on. Monster Train 2
@@ -772,7 +772,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
                 kern_return_t kr = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj);
                 LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, kr == KERN_SUCCESS ? vi.protection : -1, kr == KERN_SUCCESS ? "" : " (none)");
                 errno = e; }
-            return err_res("pread", "fd"); }
+            return err_res(container ? "RomFS read" : "pread", container ? "container" : "fd"); }
         if (r == 0) break;
         got += r;
     }
@@ -947,7 +947,7 @@ static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     size_t nov = nn; int64_t dk = m->img ? img_find(m->img, rest) : -1;
     if (dk >= 0 && !m->img->e[dk].type)   // the image's own entries of this directory, after the overlay folders' (only those can repeat a name)
         for (uint64_t j = 0; j < m->img->e[dk].b; j++) {
-            const img_ent *c = &m->img->e[m->img->e[dk].a + j]; size_t l = c->nlen < 0x300 ? c->nlen : 0x300;
+            const romfs_ent *c = &m->img->e[m->img->e[dk].a + j]; size_t l = c->nlen < 0x300 ? c->nlen : 0x300;
             memcpy(guest, m->img->names + c->name, l); guest[l] = 0;
             int dup = 0; for (size_t i = 0; i < nov; i++) if (!strcmp(names[i], guest)) { dup = 1; break; }
             if (dup) continue;
@@ -970,11 +970,11 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
     if (img_path(path, &mi, &k)) {   // an image directory: its children are one run of entries, listed from a snapshot like the overlay's
         if (k >= 0 && g_mnt[mi].img->e[k].type) errno = ENOTDIR, k = -1;
         if (k < 0) return err_res("opendir", path);
-        const romfs_img *m = g_mnt[mi].img; const img_ent *x = &m->e[k];
+        const romfs_container *m = g_mnt[mi].img; const romfs_ent *x = &m->e[k];
         dirh_t *h = calloc(1, sizeof *h); if (!h || !(h->snap = calloc(x->b ? x->b : 1, sizeof *h->snap))) die("RomFS image directory allocation failed");
         h->nsnap = (int64_t)x->b; h->mode = mode; strlcpy(h->path, path, sizeof h->path);
         for (uint64_t j = 0; j < x->b; j++) {
-            const img_ent *c = &m->e[x->a + j]; DirectoryEntry *o = &h->snap[j];
+            const romfs_ent *c = &m->e[x->a + j]; DirectoryEntry *o = &h->snap[j];
             memcpy(o->name, m->names + c->name, c->nlen < sizeof o->name ? c->nlen : sizeof o->name - 1);
             o->type = c->type ? ENT_FILE : ENT_DIR; o->size = c->type ? (int64_t)c->b : 0;
         }

@@ -5,6 +5,7 @@ No game files, keys or Xcode needed (temporary files only in a temporary folder)
 import importlib.util
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 import types
@@ -209,6 +210,30 @@ class EnvFile(Base):
 
     def test_missing(self):
         with self.assertRaises(nsp.BuildError): nsp.env_file_pairs(self.tmp / 'none.txt')
+
+
+class Launcher(Base):
+    def test_writes_executable_run_script(self):
+        command = "cd '/a folder/run' && DM_WINDOW=1 '/a folder/dmhost' '/a folder/patched'"
+        launcher = nsp.write_mac_launcher(self.tmp, command)
+        self.assertEqual(launcher, self.tmp / 'run_game.sh')
+        self.assertEqual(launcher.read_text(), '#!/bin/sh\nset -eu\n\n' + command + '\n')
+        self.assertTrue(launcher.stat().st_mode & stat.S_IXUSR)
+
+    def test_creates_shortcut_app_once(self):
+        applications = self.tmp / 'Applications'; applications.mkdir()
+        launcher = self.tmp / 'game build/run_game.sh'; launcher.parent.mkdir(); launcher.write_text('#!/bin/sh\n')
+        def compile_app(cmd, **kwargs):
+            out = Path(cmd[cmd.index('-o') + 1]); (out / 'Contents').mkdir(parents=True)
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        with mock.patch.object(nsp.subprocess, 'run', side_effect=compile_app) as run:
+            app, created = nsp.mac_shortcut(launcher, 'Mario: Kart/World', applications)
+        self.assertTrue(created); self.assertEqual(app, applications / 'Mario - Kart - World.app')
+        source = run.call_args.args[0][-1]
+        self.assertIn("nohup '/", source); self.assertIn("game build/run_game.sh'", source)
+        with mock.patch.object(nsp.subprocess, 'run') as run:
+            self.assertEqual(nsp.mac_shortcut(launcher, 'Mario: Kart/World', applications), (app, False))
+        run.assert_not_called()
 
 
 if __name__ == '__main__':

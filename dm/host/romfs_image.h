@@ -13,7 +13,7 @@ _Static_assert(sizeof(img_ent) == 24, "RomFS image entry layout");
 typedef struct { int fd; uint64_t n; img_ent *e; const char *names; } romfs_img;
 
 static void romfs_image_close(romfs_img *m) {
-    if (m) { close(m->fd); free(m->e); free(m); }
+    if (m) { if (m->fd >= 0) close(m->fd); free(m->e); free(m); }
 }
 static int romfs_image_read(int fd, void *buf, size_t size, off_t off) {
     size_t got = 0;

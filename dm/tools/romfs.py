@@ -84,6 +84,11 @@ class Image:
 @functools.lru_cache(maxsize=8)
 def _image(path, identity): return Image(path) if is_image(path) else None
 
+@functools.lru_cache(maxsize=8)
+def _nup(path, identity):
+    import nup
+    return nup.load(path)
+
 
 def is_image(path):
     try:
@@ -95,19 +100,22 @@ def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
     parts = p.split('/')
     for i, part in enumerate(parts):
-        if not part.endswith('.img'): continue
-        image = '/'.join(parts[:i + 1])
-        try: st = _os.stat(image)
+        if not (part.endswith('.img') or part.endswith('.nup')): continue
+        container = '/'.join(parts[:i + 1])
+        try: st = _os.stat(container)
         except OSError: continue
         if not _stat.S_ISREG(st.st_mode): continue
-        loaded = _image(image, (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        identity = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        loaded = _image(container, identity) if part.endswith('.img') else _nup(container, identity)
         if loaded is not None: return loaded, '/'.join(parts[i + 1:])
     return None
 
 
 def source(extraction):
-    image = _Path(extraction) / 'RomFS.img'
-    return Path(image if image.is_file() else _Path(extraction) / 'RomFS')
+    for name in ('RomFS.img', 'RomFS.nup'):
+        container = _Path(extraction) / name
+        if container.exists(): return Path(container)
+    return Path(_Path(extraction) / 'RomFS')
 
 
 _fd_ranges = {}
@@ -148,7 +156,7 @@ else:
         if mode not in ('r', 'rb', 'rt'): raise OSError(errno.EROFS, 'RomFS images are read-only', file)
         image, relative = resolved; k = image.find(relative)
         if not image.entry(k)[4]: raise IsADirectoryError(file)
-        raw = _File(image, k)
+        raw = image.file(k) if hasattr(image, 'file') else _File(image, k)
         if buffering == 0 and 'b' in mode: return raw
         reader = io.BufferedReader(raw, io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering or io.DEFAULT_BUFFER_SIZE)
         return reader if 'b' in mode else io.TextIOWrapper(reader, encoding=encoding, errors=errors, newline=newline)

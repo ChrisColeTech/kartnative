@@ -14,6 +14,7 @@
 #include <signal.h>
 static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 #define pwrite fake_pwrite
+#include "../romfs_image.h"
 #include "../hle_fs.c"
 #undef pwrite
 ssize_t pwrite(int, const void *, size_t, off_t);
@@ -35,6 +36,8 @@ static int same(const char *p, const char *s) {
     char b[64] = {0}; FILE *f = fopen(p, "r"); if (!f) return 0; size_t k = fread(b, 1, sizeof b - 1, f); fclose(f);
     return k == strlen(s) && !memcmp(b, s, k);
 }
+static void put32(void *p, uint32_t v) { memcpy(p, &v, sizeof v); }
+static void put64(void *p, uint64_t v) { memcpy(p, &v, sizeof v); }
 static Result write_save(const char *path, const char *s) {           // open -> set size -> write -> close
     uint64_t h; Result r = h_fs_OpenFile(&h, path, MODE_WRITE); if (r) return r;
     h_fs_SetFileSize(h, (int64_t)strlen(s));
@@ -113,6 +116,32 @@ int main(void) {
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
         f = fopen(ip, "wb"); fwrite(img, 1, 39 + 50, f); fclose(f);   // cut off inside the index, as a copy stopped partway
         CHECK(!img_open(ip), "a cut-off image is refused");
+    }
+
+    printf("NUP RomFS\n");   // /data/raw = hello; /data/packed = one zstd frame for packed-data-packed-data
+    {   static const uint8_t packed[] = {0x28,0xb5,0x2f,0xfd,0x20,0x17,0x95,0x00,0x00,0x60,0x70,0x61,0x63,0x6b,0x65,0x64,0x2d,0x64,0x61,0x74,0x61,0x2d,0x01,0x00,0x37,0x4a,0x12};
+        enum { TOC = 12 + 5 + sizeof packed, POOL = 48 + 64 + 2 * 24 + 2 * 80 + 3 * 4, NUP_SIZE = TOC + POOL + 13 };
+        uint8_t package[NUP_SIZE]; memset(package, 0, sizeof package);
+        memcpy(package, "NUP\1", 4); put32(package + 8, TOC); memcpy(package + 12, "hello", 5); memcpy(package + 17, packed, sizeof packed);
+        uint8_t *t = package + TOC; memcpy(t, "TOC\1", 4); put32(t + 4, 1); put64(t + 8, 2); put64(t + 16, 2); put64(t + 24, POOL); put64(t + 32, 13);
+        put64(t + 48, 0x0400c3f00006e000ull); put32(t + 48 + 16, 0);   // last title's RomFS directory
+        uint8_t *dirs = t + 48 + 64, *files = dirs + 2 * 24, *children = files + 2 * 80, *pool = t + POOL;
+        put32(dirs + 8, 0); put32(dirs + 12, 1);                         // root → data
+        put32(dirs + 24, 0); put32(dirs + 28, 4); put32(dirs + 32, 1); put32(dirs + 36, 2);
+        put32(files, 4); put32(files + 4, 3); put64(files + 8, 5); put64(files + 16, 12); put64(files + 24, 5);
+        put32(files + 80, 7); put32(files + 84, 6); put64(files + 88, 23); put64(files + 96, 17); put64(files + 104, sizeof packed); files[80 + 64] = 1;
+        put32(children, 1); put32(children + 4, 3); put32(children + 8, 2); memcpy(pool, "datarawpacked", 13);
+        char np[1100]; snprintf(np, sizeof np, "%s/rom.nup", root); FILE *f = fopen(np, "wb"); fwrite(package, 1, sizeof package, f); fclose(f);
+        g_nmnt = 0; setenv("DM_ROMFS", np, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the NUP");
+        CHECK(read_fs("rom:/data/raw", got, sizeof got) && !strcmp(got, "hello"), "reads a raw NUP file in place");
+        CHECK(read_fs("rom:/data/packed", got, sizeof got) && !strcmp(got, "packed-data-packed-data"), "decompresses a zstd NUP file");
+        uint64_t h; size_t n = 0; int64_t sz = 0; char b[16] = {0};
+        CHECK(h_fs_OpenFile(&h, "rom:/data/packed", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 7, b, 4) == RES_OK && n == 4 && !memcmp(b, "data", 4), "reads a zstd file at an offset");
+        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 23, "reports its logical size"); h_fs_CloseFile(h);
+        DirectoryEntry de[2]; int64_t cnt = 0;
+        CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 2) == RES_OK && cnt == 2 && !strcmp(de[0].name, "packed") && !strcmp(de[1].name, "raw"), "lists sorted NUP children"); h_fs_CloseDirectory(h);
+        package[17] ^= 0xff; snprintf(np, sizeof np, "%s/bad.nup", root); f = fopen(np, "wb"); fwrite(package, 1, sizeof package, f); fclose(f);
+        g_nmnt = 0; setenv("DM_ROMFS", np, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && !read_fs("rom:/data/packed", got, sizeof got), "a corrupt zstd frame fails its read");
     }
     snprintf(save, sizeof save, "%s/save", root); snprintf(work, sizeof work, "%s.work", save);
     mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "old");

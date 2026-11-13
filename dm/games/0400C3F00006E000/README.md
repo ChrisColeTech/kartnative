@@ -14,6 +14,8 @@ Switch 2, `0400C3F00006E000`, 1.0.0 (`ResourceSizeTable.Product.100`). Plays on 
 
 All three modules have `DT_INIT`, which runs their `DT_INIT_ARRAY` (main 2,866 entries, sdk 86, subsdk0 4): the loader needs nothing for an init array without `DT_INIT`.
 
+The Mac build can use a folder containing the v0 `.nup` directly: `python3 scripts/build_ipa_from_nsp.py <folder> --platform mac`. It materializes only ExeFS in the build folder; scanners and the host read the package's 205,665-file RomFS in place, including its zstd-coded entries, so no 23 GB loose RomFS copy is made ([NUP package input](../../../docs/reference/packing.md#a-nup-package-is-used-without-a-second-full-romfs-copy)).
+
 ## What the profile needs and why
 
 - `switch2 on`: from `main.npdm` (`profile_guess.py` `switch2`). The host then answers as a Switch 2: 31.25 MHz counter, six cores, the Switch 2 kernel's `GetInfo` ids and svc 0x80.
@@ -234,6 +236,7 @@ The two programs with a global memory access through a pointer (current, chain 8
 
 ## Found on this game
 
+- [A NUP package is used without a second full RomFS copy](../../../docs/reference/packing.md#a-nup-package-is-used-without-a-second-full-romfs-copy): direct package input keeps the 23 GB RomFS in place.
 - [Switch 2 (NVN2) shader binaries](../../../docs/reference/shaders.md#switch-2-nvn2-shader-binaries): the split's containers and keys.
 - [A vector register taken for the jump table index](../../../docs/reference/rewriter.md#a-vector-register-taken-for-the-jump-table-index): the rewrite of `main` stopped at `main+0xea4a8`.
 - [Switch 2 code: the instructions capstone 5 leaves undecoded](../../../docs/reference/rewriter.md#switch-2-code-the-instructions-capstone-5-leaves-undecoded). The modules read only `cntpct_el0` among the counters (40 gates in `sdk`), no `cntfrq` / `cntvct` / ID registers; one MTE `stg` in `sdk` (`sdk+0x74c160`, libunwind's stack retag, behind a flag).

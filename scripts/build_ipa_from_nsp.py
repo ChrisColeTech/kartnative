@@ -13,9 +13,9 @@
 #   names another path): the launcher dm/mac/launcher.c, the Mac host, the RomFS (APFS clones on the build's volume), the Mac shader libraries, the DLC and the rewritten modules inside it; the save
 #   in ~/Library/Application Support/nxnative/<title ID>/, the log in ~/Library/Logs/nxnative/<title ID>.log. Signed ad-hoc, or with MAC_SIGN / --mac-sign; no hardened runtime, no notarization.
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
-#   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
+#   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder | NUP file> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
-# Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
+# Uses this repository and one game folder: NSPs plus prod.keys, loose exefs/ and romfs/ folders, or one .nup for a direct Mac build.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (nx_extract, and the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
@@ -503,10 +503,45 @@ def loose_dump(d):
     pkgs = [p.name for p in d.iterdir() if p.suffix in ('.nsp', '.nsz', '.xci', '.xcz') and not p.name.startswith('._')]
     if pkgs: say(f'{d} holds a loose dump (exefs/, romfs/): building from it, not from {", ".join(pkgs)}')
     nacp = next((p for p in (d / 'control.nacp', d / 'control' / 'control.nacp') if p.is_file()), None)
-    return types.SimpleNamespace(exefs=exefs, romfs=romfs, nacp=nacp)
+    return types.SimpleNamespace(nup=None, exefs=exefs, romfs=romfs, nacp=nacp)
+
+
+def nup_dump(source):
+    """The selected .nup, or the one in a source folder, if any. Its RomFS stays in the package;
+    only its small ExeFS is materialized when the build needs ordinary files to rewrite."""
+    paths = [source] if source.is_file() else sorted(p for p in source.iterdir() if p.suffix.lower() == '.nup' and not p.name.startswith('._'))
+    if not paths: return None
+    if len(paths) != 1: raise BuildError(f'{source} holds more than one .nup: {", ".join(p.name for p in paths)}; pass the full path of the one to build')
+    if paths[0].suffix.lower() != '.nup': raise BuildError(f'not a .nup file: {paths[0]}')
+    import nup
+    try: package = nup.load(paths[0])
+    except (OSError, ValueError, struct.error) as e: raise BuildError(f'cannot read {paths[0]}: {e}') from e
+    if package is None: raise BuildError(f'{paths[0]} has a .nup suffix but no NUP header')
+    entries = {name: (size, read) for name, size, read in package.exefs()}
+    for name in ('main', 'main.npdm'):
+        if name not in entries: raise BuildError(f'{paths[0]} has no ExeFS {name}')
+    return types.SimpleNamespace(nup=package, path=paths[0], entries=entries, exefs=None, romfs=paths[0], nacp=None)
+
+
+def nup_build_id(dump, name):
+    entry = dump.entries.get(name)
+    if not entry: return None
+    data = entry[1]()
+    return data[0x40:0x50].hex() if len(data) >= 0x50 and data[:4] == b'NSO0' else None
+
+
+def materialize_nup_exefs(dst, dump):
+    """Write the NUP's ExeFS to an empty directory. Rewriting requires ordinary files, but
+    the multi-gigabyte RomFS remains in the package and is never unpacked."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for name, (size, read) in dump.entries.items():
+        data = read()
+        if len(data) != size: raise BuildError(f'{dump.path}: ExeFS {name} is {len(data)} of {size} bytes')
+        (dst / name).write_bytes(data)
 
 
 def loose_title(loose):   # the dump's title ID: the program ID in main.npdm's ACI0 (a loose dump has no ticket or content meta)
+    if loose.nup: return loose.nup.title[0]
     tid = pg.npdm(loose.exefs / 'main.npdm')[1]
     if not tid: raise BuildError(f'{loose.exefs / "main.npdm"} names no program ID (no ACI0 header)')
     return tid
@@ -517,13 +552,13 @@ def loose_version(loose, g, want):
     if want: return want
     for ver, b in (g.builds() if g else {}).items():
         mods = {m: bid for m, bid in b.items() if m != 'display'}
-        if mods and all((loose.exefs / m).is_file() and build_id(loose.exefs / m) == bid for m, bid in mods.items()): return ver
+        if mods and all((nup_build_id(loose, m) if loose.nup else build_id(loose.exefs / m) if (loose.exefs / m).is_file() else None) == bid for m, bid in mods.items()): return ver
     return 'v0'
 
 
 def loose_same_build(loose):   # same_build for a loose dump: its main's build ID against every profile's build rows → (profile, version, main build ID) or None
     import game as gamemod   # dm/games (main put it on the path)
-    bid = build_id(loose.exefs / 'main'); g = gamemod.by_build(bid)
+    bid = nup_build_id(loose, 'main') if loose.nup else build_id(loose.exefs / 'main'); g = gamemod.by_build(bid)
     return (g, next(ver for ver, b in g.builds().items() if b.get('main') == bid), bid) if g else None
 
 
@@ -541,6 +576,28 @@ def link_loose(ex, ver, loose):
         elif p.exists(): raise BuildError(f'{p} is from an extraction: delete {dst} to build from the loose dump at {loose.exefs.parent}')
         if src is not None: p.symlink_to(src, target_is_directory=src.is_dir())
     PROG.end(f'linked to the loose dump {loose.exefs.parent}')
+    return dst
+
+
+def link_nup(ex, ver, dump):
+    """Materialize ExeFS and link the original NUP as RomFS.nup where an extraction lives."""
+    PROG.stage(f'game files {ver}')
+    dst = ex / ver
+    st = dump.path.stat()
+    stamp = f'{dump.path.resolve()}\n{st.st_size}\n{st.st_mtime_ns}\n'
+    source = dst / '.nup-source'
+    if source.is_file() and source.read_text(errors='replace') == stamp and (dst / 'ExeFS' / 'main').is_file() \
+            and (dst / 'RomFS.nup').is_symlink() and (dst / 'RomFS.nup').resolve() == dump.path.resolve():
+        PROG.end(f'reusing ExeFS and the in-place NUP {dump.path.name}')
+        return dst
+    if dst.exists() and not source.is_file():
+        raise BuildError(f'{dst} holds another extraction: delete it to build from {dump.path}')
+    tmp = ex / (ver + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
+    materialize_nup_exefs(tmp / 'ExeFS', dump)
+    (tmp / 'RomFS.nup').symlink_to(dump.path)
+    (tmp / '.nup-source').write_text(stamp)
+    swap_in(tmp, dst)
+    PROG.end(f'ExeFS materialized; RomFS reads {dump.path.name} in place')
     return dst
 
 
@@ -693,7 +750,12 @@ def survey(nsp_dir, app, fam, keys, repo, py, env, loose=None, version='v0'):
     files written). From a loose dump (loose_dump): its own ExeFS and RomFS folders, read where they are; version names it (loose_version)"""
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'no game profile for {app:016X}: surveying first')
-    if loose:
+    if loose and loose.nup:
+        PROG.plan(2)
+        rmtree(ex); materialize_nup_exefs(ex / 'ExeFS', loose)
+        exefs, rom_src, ctl, nro_dir, dv, upd, ups = ex / 'ExeFS', rfs.Path(loose.path), None, rfs.Path(loose.path), None, None, []
+        say(f'reading RomFS in place from {loose.path}; only ExeFS was materialized for analysis')
+    elif loose:
         PROG.plan(2)   # the code modules (reading them, then the rewrite-site census), the imports
         exefs, rom_src, ctl, nro_dir, dv, upd, ups = loose.exefs, loose.romfs, loose.nacp, loose.romfs, None, None, []
         say(f'reading the loose dump in place (nothing extracted): {loose.exefs}, {loose.romfs}')
@@ -718,7 +780,8 @@ def survey(nsp_dir, app, fam, keys, repo, py, env, loose=None, version='v0'):
     check_aarch64(exefs, f'{title or "?"} ({app:016X})')
     F = pg.facts_of(exefs, rom_src); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
     R = [f'# Survey: {title or "?"} ({app:016X})', '', f'- display version: {dv.group(1) if dv else nacp.version(ctl) if ctl else "?"}']
-    if loose: R.append(f'- loose dump: `{loose.exefs}` and `{loose.romfs}`' + ('' if ctl else ' (no control data: no game name, display version or languages)'))
+    if loose and loose.nup: R.append(f'- NUP: `{loose.path}` (RomFS read in place; no control data: no game name, display version or languages)')
+    elif loose: R.append(f'- loose dump: `{loose.exefs}` and `{loose.romfs}`' + ('' if ctl else ' (no control data: no game name, display version or languages)'))
     else: R.append(f'- base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)')
     R += [f'- update: `{p.name}` (v{v}, {p.stat().st_size / 2**30:.2f} GB){" (used for this survey)" if p == upd else ""}' for v, p in ups]
     R += [f'- DLC: `{p.name}` ({p.stat().st_size / 1024:.0f} KB{", licence only, no content" if p.stat().st_size < 1 << 20 else ""})' for _, _, p in fam['dlc']]
@@ -2125,6 +2188,36 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
     return f'cd {q(rd)} && ' + ' '.join(f'{k}={q(v)}' for k, v in renv.items()) + f' {q(host)} {q(patched)}'
 
 
+def write_mac_launcher(work, command):
+    """Persist the printed Mac run command so the completed build can be launched again directly."""
+    launcher = work / 'run_game.sh'
+    launcher.write_text('#!/bin/sh\nset -eu\n\n' + command + '\n')
+    launcher.chmod(0o755)
+    return launcher
+
+
+def mac_shortcut(launcher, name, applications=Path('/Applications')):
+    """Create a small AppleScript application that starts a generated Mac launcher, without
+    replacing an app or shortcut the user already has under the game's name."""
+    app = applications / f'{mac_app_name(name)}.app'
+    if app.exists() or app.is_symlink(): return app, False
+    tmp = applications / f'.{mac_app_name(name)}.partial.app'
+    rmtree(tmp)
+    log = launcher.parent / 'logs/mac_launch.log'
+    shell = f'nohup {shlex.quote(str(launcher))} > {shlex.quote(str(log))} 2>&1 &'
+    source = 'do shell script "' + shell.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    try: result = subprocess.run(['osacompile', '-o', str(tmp), '-e', source], capture_output=True, text=True)
+    except OSError as e: raise BuildError(f'cannot create {app}: {e}') from e
+    if result.returncode or not tmp.is_dir():
+        rmtree(tmp)
+        why = (result.stderr or result.stdout).strip() or f'osacompile exit code {result.returncode}'
+        raise BuildError(f'cannot create {app}: {why}')
+    try: tmp.rename(app)
+    except FileExistsError: rmtree(tmp); return app, False
+    except OSError as e: rmtree(tmp); raise BuildError(f'cannot create {app}: {e}') from e
+    return app, True
+
+
 MTL_ARCH_M = '''#import <Metal/Metal.h>
 int main(void) { @autoreleasepool { id<MTLDevice> d = MTLCreateSystemDefaultDevice(); if (!d) return 1; printf("%s\\n", d.architecture.name.UTF8String); return 0; } }
 '''
@@ -2210,9 +2303,9 @@ def parse_args(argv):
     """Command-line options: when given they override "Settings"; F5 in Spyder passes none, so "Settings" is used as is. -h shows the help"""
     import argparse
     ap = argparse.ArgumentParser(prog='build_ipa_from_nsp.py',
-        description='Build an unsigned IPA or prepare an Xcode project from a game\'s NSPs; a game with no profile is surveyed and gets a provisional profile.',
+        description='Build from a game\'s NSPs, loose dump or NUP; a game with no profile is surveyed and gets a provisional profile.',
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
-    ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs (default: the NSP_DIR setting, else asked)')
+    ap.add_argument('nsp_dir', nargs='?', metavar='INPUT', help='folder holding one game\'s NSPs or loose dump, or the exact NUP file to build (default: the NSP_DIR setting, else asked)')
     ap.add_argument('-k', '--keys', help='path of prod.keys (default: the PROD_KEYS setting, else asked)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
@@ -2225,6 +2318,7 @@ def parse_args(argv):
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
+    ap.add_argument('--mac-shortcut', action='store_true', help='--platform mac: create /Applications/<game name>.app for the generated run_game.sh when no app with that name exists')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
     ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
@@ -2320,6 +2414,7 @@ def main(args=None):
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
+    if args.mac_shortcut and platform != 'mac': raise BuildError('--mac-shortcut creates a launcher for a Mac development build: it needs --platform mac')
     if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     check_native_python()
@@ -2331,9 +2426,12 @@ def main(args=None):
     if romfs_mode not in ('bundle', 'separate'): raise BuildError(f'ROMFS / --romfs must be bundle or separate: {romfs_mode}')
     if romfs_mode == 'separate' and mac: raise BuildError(f'--romfs separate keeps the game files off the iPhone app: it cannot be combined with --platform {platform}, which runs from the extracted files')
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
-    nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
-    if not nsp_dir.is_dir(): raise BuildError(f'not a folder: {nsp_dir}')
-    loose = loose_dump(nsp_dir)   # a loose dump (exefs/ and romfs/ folders) instead of packages: nothing to extract, so no keys
+    source = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder or NUP file: ', 'the NSP folder or NUP file'))).resolve()
+    if not source.exists(): raise BuildError(f'no such file or folder: {source}')
+    if not (source.is_dir() or source.is_file()): raise BuildError(f'not a file or folder: {source}')
+    nsp_dir = source.parent if source.is_file() else source
+    loose = nup_dump(source) if source.is_file() else loose_dump(source) or nup_dump(source)   # loose folders or a selected NUP instead of packages: no keys or multi-gigabyte extraction
+    if loose and loose.nup and platform != 'mac': raise BuildError(f'a NUP is read in place by the development host: use --platform mac, not --platform {platform}')
     keys = None if loose else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
@@ -2349,7 +2447,8 @@ def main(args=None):
     py = sys.executable
     if loose:
         app, fam = loose_title(loose), {'base': None, 'updates': [], 'dlc': []}
-        say(f'loose dump of {app:016X} (main.npdm\'s program ID): {loose.exefs}, {loose.romfs}')
+        if loose.nup: say(f'NUP of {app:016X} (package title ID): {loose.path}; RomFS will be read in place')
+        else: say(f'loose dump of {app:016X} (main.npdm\'s program ID): {loose.exefs}, {loose.romfs}')
     else:
         with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
@@ -2437,7 +2536,7 @@ def main(args=None):
         PROG.end()
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image; a loose dump's one version is linked where its extraction would be
-        if loose: dirs[ver] = link_loose(ex, ver, loose); continue
+        if loose: dirs[ver] = link_nup(ex, ver, loose) if loose.nup else link_loose(ex, ver, loose); continue
         b, u = picks[ver]
         dirs[ver] = extract(nx, keys, ex, ver, b, u, None, logs, g)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
@@ -2548,7 +2647,12 @@ def main(args=None):
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         host, font = mac_host(py, repo, work, env, logs, g)
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file)
+        launcher = write_mac_launcher(work, cmd)
         rmtree(work / 'tmp')
+        say(f'launcher: {launcher}')
+        if args.mac_shortcut:
+            shortcut, created = mac_shortcut(launcher, app_name)
+            say(f'shortcut: {shortcut} ({"created" if created else "already exists, left unchanged"})')
         say(f'done: the game runs on the Mac with this command (its save in {work / "run/save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')
         PROG.say(cmd)
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac build', patched)

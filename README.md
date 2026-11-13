@@ -32,6 +32,8 @@
    python3 scripts/build_ipa_from_nsp.py ~/Games/MarioKartWorld --platform mac --no-heap-check --allow-other-metal
    ```
 
+   A `.nup` can instead be read directly, including from an external drive, without making another RomFS copy. [The direct-NUP Mac guide](docs/nup-mac.md) explains the wrapper, storage layouts, shader reuse, moving the package and the generated shortcut.
+
 4. Run the command the script prints. It opens a window (`DM_WINDOW=1`). Useful additions:
 
    | Variable | Effect |
